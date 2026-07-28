@@ -178,7 +178,7 @@ export default function SettingsPage({ navigate, onSettingsSaved }: SettingsPage
   };
 
   // Hotspot Settings state
-  const [hotspotStatus, setHotspotStatus] = useState<{ active: boolean; ssid: string; password: string; ip: string; clientsCount: number } | null>(null);
+  const [hotspotStatus, setHotspotStatus] = useState<{ active: boolean; ssid: string; password: string; ip: string; clientsCount: number; readinessError?: string | null } | null>(null);
   const [hotspotSsid, setHotspotSsid] = useState('RaspiMC-AP');
   const [hotspotPassword, setHotspotPassword] = useState('RaspberryMinecraft');
   const [showHotspotPass, setShowHotspotPass] = useState(false);
@@ -576,6 +576,16 @@ export default function SettingsPage({ navigate, onSettingsSaved }: SettingsPage
               </span>
             )}
           </div>
+
+          {hotspotStatus?.readinessError && (
+            <div className="p-3.5 rounded-lg border bg-amber-500/10 border-amber-500/20 text-amber-300 text-xs flex items-start gap-2.5">
+              <AlertCircle size={16} className="shrink-0 mt-0.5 text-amber-400" />
+              <div className="space-y-1">
+                <span className="font-bold text-amber-200 block">Diagnóstico del Sistema para Hotspot:</span>
+                <span className="leading-relaxed block">{hotspotStatus.readinessError}</span>
+              </div>
+            </div>
+          )}
 
           {hotspotMsg && (
             <div className={`p-3 rounded-lg border text-xs font-medium flex items-center gap-2 ${
