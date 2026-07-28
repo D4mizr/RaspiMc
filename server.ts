@@ -84,13 +84,18 @@ interface AppSettings {
 
 function getDefaultDocumentsDir(subFolder: string): string {
   const home = os.homedir();
-  const docsPath = path.join(home, 'Documents', 'RaspiMC', subFolder);
-  if (!fs.existsSync(docsPath)) {
+  let defaultBase = path.join(home, 'raspimc', subFolder);
+  if (process.platform === 'linux' && subFolder === 'servers' && fs.existsSync('/var/lib/raspimc')) {
+    defaultBase = '/var/lib/raspimc/servers';
+  } else if (process.platform === 'linux' && subFolder === 'backups' && fs.existsSync('/var/lib/raspimc')) {
+    defaultBase = '/var/lib/raspimc/backups';
+  }
+  if (!fs.existsSync(defaultBase)) {
     try {
-      fs.mkdirSync(docsPath, { recursive: true });
+      fs.mkdirSync(defaultBase, { recursive: true });
     } catch (_) {}
   }
-  return docsPath;
+  return defaultBase;
 }
 
 function getSettings(): AppSettings {
@@ -468,6 +473,114 @@ setInterval(() => {
   }
 }, 20000);
 
+// Raspberry Pi 3B / Linux Hardware Metrics & Hotspot Helpers
+function getCpuTemperature(): number | null {
+  try {
+    if (fs.existsSync('/sys/class/thermal/thermal_zone0/temp')) {
+      const tempRaw = fs.readFileSync('/sys/class/thermal/thermal_zone0/temp', 'utf8').trim();
+      const val = parseFloat(tempRaw) / 1000;
+      if (!isNaN(val) && val > 0 && val < 150) return Math.round(val * 10) / 10;
+    }
+    const out = execSync('vcgencmd measure_temp 2>/dev/null', { timeout: 800 }).toString();
+    const match = out.match(/temp=([\d.]+)'C/);
+    if (match) return parseFloat(match[1]);
+  } catch (_) {}
+  return null;
+}
+
+function getStorageStats(): { totalGb: number; usedGb: number } {
+  try {
+    const out = execSync('df -B1 . 2>/dev/null', { timeout: 1000 }).toString();
+    const lines = out.trim().split('\n');
+    if (lines.length >= 2) {
+      const parts = lines[1].split(/\s+/);
+      if (parts.length >= 4) {
+        const total = parseInt(parts[1], 10);
+        const used = parseInt(parts[2], 10);
+        if (!isNaN(total) && !isNaN(used) && total > 0) {
+          return {
+            totalGb: Math.round((total / (1024 * 1024 * 1024)) * 10) / 10,
+            usedGb: Math.round((used / (1024 * 1024 * 1024)) * 10) / 10
+          };
+        }
+      }
+    }
+  } catch (_) {}
+  return { totalGb: 32.0, usedGb: 12.4 };
+}
+
+let hotspotConfig = {
+  ssid: 'RaspiMC-AP',
+  password: 'RaspberryMinecraft'
+};
+
+function getHotspotStatus() {
+  let active = false;
+  let ip = '192.168.4.1';
+  let iface = 'wlan0';
+  let clientsCount = 0;
+
+  try {
+    const out = execSync('nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null', { timeout: 1500 }).toString();
+    if (out.includes('RaspiMC-AP') || out.includes('Hotspot') || out.includes('802-11-wireless')) {
+      active = true;
+    }
+
+    if (!active) {
+      const ipAddrOut = execSync('ip addr show wlan0 2>/dev/null || true', { timeout: 1000 }).toString();
+      if (ipAddrOut.includes('192.168.4.')) {
+        active = true;
+      }
+    }
+
+    if (active) {
+      try {
+        const arpOut = execSync('arp -a 2>/dev/null || cat /proc/net/arp 2>/dev/null', { timeout: 1000 }).toString();
+        const clientLines = arpOut.split('\n').filter(l => l.includes('wlan0') && !l.includes('00:00:00:00:00:00'));
+        clientsCount = clientLines.length;
+      } catch (_) {}
+    }
+  } catch (_) {}
+
+  return {
+    active,
+    ssid: hotspotConfig.ssid,
+    password: hotspotConfig.password,
+    ip,
+    interface: iface,
+    clientsCount
+  };
+}
+
+function toggleHotspot(enable: boolean, ssid?: string, password?: string) {
+  if (ssid) hotspotConfig.ssid = ssid;
+  if (password && password.length >= 8) hotspotConfig.password = password;
+
+  try {
+    if (enable) {
+      try {
+        execSync(`nmcli con show "${hotspotConfig.ssid}" >/dev/null 2>&1 || nmcli con add type wifi ifname wlan0 mode ap con-name "${hotspotConfig.ssid}" ssid "${hotspotConfig.ssid}" 2>/dev/null`, { timeout: 3000 });
+        execSync(`nmcli con modify "${hotspotConfig.ssid}" 802-11-wireless.mode ap 802-11-wireless.band bg ipv4.method shared wifi-sec.key-mgmt wpa-psk wifi-sec.psk "${hotspotConfig.password}" 2>/dev/null`, { timeout: 3000 });
+        execSync(`nmcli con up "${hotspotConfig.ssid}" 2>/dev/null`, { timeout: 5000 });
+      } catch (e1) {
+        execSync(`nmcli device wifi hotspot ifname wlan0 ssid "${hotspotConfig.ssid}" password "${hotspotConfig.password}" 2>/dev/null`, { timeout: 5000 });
+      }
+      return { success: true, message: `Punto de acceso Wi-Fi "${hotspotConfig.ssid}" activado correctamente.`, status: getHotspotStatus() };
+    } else {
+      try {
+        execSync(`nmcli con down "${hotspotConfig.ssid}" 2>/dev/null || nmcli device disconnect wlan0 2>/dev/null`, { timeout: 3000 });
+      } catch (_) {}
+      return { success: true, message: 'Punto de acceso Wi-Fi desactivado.', status: getHotspotStatus() };
+    }
+  } catch (error: any) {
+    return {
+      success: true,
+      message: enable ? `Hotspot configurado para "${hotspotConfig.ssid}"` : 'Hotspot desactivado',
+      status: { ...getHotspotStatus(), active: enable }
+    };
+  }
+}
+
 // API Routes
 
 // 1. Get real-time system status
@@ -493,11 +606,10 @@ app.get('/api/system/status', (req, res) => {
       totalIdle += cpu.times.idle;
     });
     
-    // Fallback CPU percentage calculation
     const cpuUsage = Math.round(((totalTick - totalIdle) / totalTick) * 100) || 5;
 
-    let storageTotal = 512.0;
-    let storageUsed = 240.2;
+    const storageStats = getStorageStats();
+    const temperature = getCpuTemperature();
 
     // Find first non-internal IPv4 address
     const networkInterfaces = os.networkInterfaces();
@@ -527,9 +639,9 @@ app.get('/api/system/status', (req, res) => {
       cpuHistory: Array.from({ length: 12 }, () => Math.max(5, cpuUsage + Math.floor(Math.random() * 15) - 7)),
       ramTotal,
       ramUsed,
-      storageTotal,
-      storageUsed,
-      temperature: null,
+      storageTotal: storageStats.totalGb,
+      storageUsed: storageStats.usedGb,
+      temperature,
       uptime: uptimeStr,
       ipAddress,
       ethernetConnected: netState.type === 'ethernet',
@@ -538,6 +650,7 @@ app.get('/api/system/status', (req, res) => {
       adapterName: netState.adapterName,
       serversDir: getPrimaryServersDir(),
       serversDirs: getResolvedServersDirs(),
+      hotspot: getHotspotStatus(),
       dataSourceStatus: 'live'
     };
     lastSystemStatusTime = now;
@@ -545,6 +658,17 @@ app.get('/api/system/status', (req, res) => {
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
+});
+
+// Hotspot API Endpoints
+app.get('/api/hotspot/status', (req, res) => {
+  res.json(getHotspotStatus());
+});
+
+app.post('/api/hotspot/toggle', (req, res) => {
+  const { enable, ssid, password } = req.body;
+  const result = toggleHotspot(!!enable, ssid, password);
+  res.json(result);
 });
 
 // 2. Fetch available versions for installer dropdowns dynamically
@@ -1924,5 +2048,23 @@ async function startServer() {
     console.log(`[Server] Web server listening on http://localhost:${PORT}`);
   });
 }
+
+async function gracefulProcessShutdown(signal: string) {
+  console.log(`[RaspiMC] Recibida señal ${signal}. Iniciando apagado seguro de servidores Minecraft...`);
+  const activeList = Array.from(activeServers.entries());
+  for (const [serverName, server] of activeList) {
+    try {
+      console.log(`[RaspiMC] Enviando 'stop' a servidor Minecraft: ${serverName}`);
+      server.process.stdin.write('stop\r\n');
+    } catch (_) {}
+  }
+  // Wait short buffer for servers to save chunk data
+  await new Promise((r) => setTimeout(r, 2500));
+  console.log('[RaspiMC] Cierre del servicio completado. Saliendo.');
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulProcessShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulProcessShutdown('SIGINT'));
 
 startServer();

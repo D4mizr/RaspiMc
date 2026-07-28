@@ -1,6 +1,6 @@
 {
-  "name": "Raspberry Pi & Minecraft Server Dashboard",
-  "description": "Un panel de control web moderno para monitorear hosts de Windows y administrar servidores de Minecraft.",
+  "name": "RaspiMC - Panel Raspberry Pi 3B & Minecraft",
+  "description": "Un panel de control ultra ligero para Raspberry Pi OS para administrar servidores de Minecraft, monitorear el sistema y activar Hotspot Wi-Fi.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

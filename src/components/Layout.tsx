@@ -42,14 +42,14 @@ export default function Layout({
       name: 'Estado del Sistema',
       icon: Cpu,
       path: '/raspi/status',
-      category: 'Windows Host'
+      category: 'Raspberry Pi OS'
     },
     {
       id: 'settings',
       name: 'Ajustes del Sistema',
       icon: Settings,
       path: '/settings',
-      category: 'Windows Host'
+      category: 'Raspberry Pi OS'
     },
     {
       id: 'mc-list',
@@ -146,13 +146,13 @@ export default function Layout({
 
         {/* Navigation Groups */}
         <nav className="flex-1 px-4 py-6 space-y-6 overflow-y-auto" id="sidebar-nav">
-          {/* Windows Host Info section */}
+          {/* Raspberry Pi OS section */}
           <div>
             <p className="px-3 text-xs font-semibold text-slate-500 uppercase tracking-widest mb-2">
-              Windows Host
+              Raspberry Pi OS
             </p>
             <div className="space-y-1">
-              {navigationItems.filter(item => item.category === 'Windows Host').map((item) => {
+              {navigationItems.filter(item => item.category === 'Raspberry Pi OS').map((item) => {
                 const Icon = item.icon;
                 const isActive = currentPage === item.id;
                 return (

@@ -174,7 +174,7 @@ export default function SettingsPage({ navigate, onSettingsSaved }: SettingsPage
             <Settings size={22} className="text-indigo-400" />
             <span>Ajustes de la Aplicación</span>
           </h2>
-          <p className="text-sm text-slate-400">Configura múltiples ubicaciones de servidores Windows, RAM por defecto y ejecutable Java.</p>
+          <p className="text-sm text-slate-400">Configura ubicaciones de servidores en Linux, RAM por defecto para Raspberry Pi y ejecutable Java.</p>
         </div>
       </div>
 
@@ -225,7 +225,7 @@ export default function SettingsPage({ navigate, onSettingsSaved }: SettingsPage
                     type="text"
                     value={dirPath}
                     onChange={(e) => handleDirChange(idx, e.target.value)}
-                    placeholder={`Ubicación ${idx + 1} (ej: C:\\MinecraftServers o servers)`}
+                    placeholder={`Ubicación ${idx + 1} (ej: /var/lib/raspimc/servers o /home/pi/raspimc/servers)`}
                     className="w-full pl-9 pr-3.5 py-2.5 bg-slate-950 border border-slate-800 text-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 text-sm font-mono"
                     required
                     id={`settings-servers-dir-input-${idx}`}
@@ -247,7 +247,7 @@ export default function SettingsPage({ navigate, onSettingsSaved }: SettingsPage
           </div>
 
           <p className="text-xs text-slate-500 font-medium leading-relaxed">
-            WinMc escaneará y combinará los servidores encontrados en <strong>todas</strong> las ubicaciones configuradas. Puedes agregar rutas locales (ej: <code className="text-slate-400 font-mono">servers</code>), carpetas en otras unidades (ej: <code className="text-slate-400 font-mono">D:\MinecraftServers</code>) o discos de red mapeados.
+            RaspiMC escaneará y combinará los servidores encontrados en <strong>todas</strong> las ubicaciones configuradas. Puedes agregar rutas locales (ej: <code className="text-slate-400 font-mono">/var/lib/raspimc/servers</code>) o unidades externas montadas en Raspberry Pi OS.
           </p>
         </div>
 
@@ -320,7 +320,7 @@ export default function SettingsPage({ navigate, onSettingsSaved }: SettingsPage
         <div className="bg-slate-950/60 p-4 rounded-xl border border-slate-850 flex gap-3 text-slate-300 text-xs" id="settings-info-box">
           <Info size={16} className="text-indigo-400 flex-shrink-0 mt-0.5" />
           <div className="space-y-1">
-            <span className="font-bold block text-slate-200">Sincronización Inmediata en Windows</span>
+            <span className="font-bold block text-slate-200">Sincronización Inmediata en Raspberry Pi OS</span>
             <span>Cualquier cambio en las ubicaciones de almacenamiento actualizará inmediatamente la lista general de servidores sin requerir reinicio de la app. Los servidores existentes en disco se escanearán y reflejarán al instante.</span>
           </div>
         </div>

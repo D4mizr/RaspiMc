@@ -1,16 +1,14 @@
 {
-  "name": "react-example",
+  "name": "raspimc",
   "private": true,
-  "version": "1.1.1",
+  "version": "1.2.0",
   "type": "module",
-  "main": "dist/electron-main.cjs",
+  "main": "dist/server.cjs",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && esbuild src/electron-main.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/electron-main.cjs",
-    "build:exe": "npm run build && electron-builder --win portable",
-    "build:installer": "npm run build && electron-builder --win nsis",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
-    "clean": "rm -rf dist release",
+    "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
   },
   "build": {
