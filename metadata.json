@@ -1,0 +1,6 @@
+{
+  "name": "Raspberry Pi & Minecraft Server Dashboard",
+  "description": "Un panel de control web moderno para monitorear hosts de Windows y administrar servidores de Minecraft.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
