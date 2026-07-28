@@ -321,6 +321,28 @@ app.whenReady().then(async () => {
   // 5. Create System Tray
   createTray();
 
+  // 6. Monitor system update progress for window/taskbar progress bar
+  setInterval(() => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const req = http.get(`${SERVER_URL}/api/system/update/status`, (res) => {
+      let body = '';
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => {
+        try {
+          const status = JSON.parse(body);
+          if (status && status.isUpdating && typeof status.percent === 'number') {
+            const ratio = Math.max(0, Math.min(1, status.percent / 100));
+            mainWindow?.setProgressBar(ratio);
+          } else {
+            mainWindow?.setProgressBar(-1);
+          }
+        } catch (_) {}
+      });
+    });
+    req.on('error', () => {});
+    req.setTimeout(800, () => req.destroy());
+  }, 1000);
+
   console.log('Aplicación RaspiMC lista e iniciada correctamente.');
 });
 

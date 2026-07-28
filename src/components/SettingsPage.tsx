@@ -56,10 +56,24 @@ export default function SettingsPage({ navigate, onSettingsSaved }: SettingsPage
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  // Update State
-  const [isUpdating, setIsUpdating] = useState(false);
+  // System Update Progress State
+  interface SystemUpdateProgress {
+    isUpdating: boolean;
+    percent: number;
+    status: 'idle' | 'checking' | 'downloading' | 'extracting' | 'installing' | 'completed' | 'error';
+    message: string;
+    downloadedBytes?: number;
+    totalBytes?: number;
+    error?: string | null;
+  }
+
+  const [updateProgress, setUpdateProgress] = useState<SystemUpdateProgress>({
+    isUpdating: false,
+    percent: 0,
+    status: 'idle',
+    message: ''
+  });
   const [updateLogs, setUpdateLogs] = useState<string[]>([]);
-  const [updateStatusMsg, setUpdateStatusMsg] = useState<string | null>(null);
 
   // Uninstall Modal State
   const [showUninstallModal, setShowUninstallModal] = useState(false);
@@ -68,27 +82,76 @@ export default function SettingsPage({ navigate, onSettingsSaved }: SettingsPage
   const [isUninstalling, setIsUninstalling] = useState(false);
   const [uninstallStatusMsg, setUninstallStatusMsg] = useState<string | null>(null);
 
-  const handleTriggerUpdate = () => {
-    setIsUpdating(true);
-    setUpdateLogs(['Iniciando proceso de actualización desde GitHub (D4mizr/WinMc)...']);
-    setUpdateStatusMsg(null);
+  const handleTriggerUpdate = async () => {
+    setUpdateProgress({
+      isUpdating: true,
+      percent: 2,
+      status: 'checking',
+      message: 'Conectando con el servidor de actualizaciones...'
+    });
+    setUpdateLogs(['Iniciando proceso de actualización oficial (D4mizr/WinMc)...']);
 
-    fetch('/api/system/update', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    })
-      .then(res => {
-        if (!res.ok) return res.json().then(d => { throw new Error(d.message || 'Error al actualizar'); });
-        return res.json();
-      })
-      .then(data => {
-        if (data.logs) setUpdateLogs(data.logs);
-        setUpdateStatusMsg(data.message || 'Actualización completada exitosamente.');
-      })
-      .catch(err => {
-        setUpdateStatusMsg(`Error de actualización: ${err.message}`);
-      })
-      .finally(() => setIsUpdating(false));
+    try {
+      const res = await fetch('/api/system/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.message || errData.error || `Error del servidor HTTP ${res.status}`);
+      }
+
+      if (!res.body) {
+        throw new Error('El navegador no soporta transmisión de eventos.');
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const jsonStr = line.slice(6).trim();
+            if (jsonStr) {
+              try {
+                const data = JSON.parse(jsonStr);
+                setUpdateProgress({
+                  isUpdating: !!data.isUpdating,
+                  percent: typeof data.percent === 'number' ? data.percent : 0,
+                  status: data.status || 'checking',
+                  message: data.message || '',
+                  downloadedBytes: data.downloadedBytes,
+                  totalBytes: data.totalBytes,
+                  error: data.error
+                });
+
+                if (Array.isArray(data.logs)) {
+                  setUpdateLogs(data.logs);
+                }
+              } catch (_) {}
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      setUpdateProgress(prev => ({
+        ...prev,
+        isUpdating: false,
+        status: 'error',
+        error: err.message,
+        message: `Error al actualizar: ${err.message}`
+      }));
+      setUpdateLogs(prev => [...prev, `[ERROR CRÍTICO] ${err.message}`]);
+    }
   };
 
   const handleTriggerUninstall = () => {
@@ -157,6 +220,25 @@ export default function SettingsPage({ navigate, onSettingsSaved }: SettingsPage
         setHotspotStatus(data);
         if (data.ssid) setHotspotSsid(data.ssid);
         if (data.password) setHotspotPassword(data.password);
+      })
+      .catch(() => {});
+
+    // Also fetch system update status
+    fetch('/api/system/update/status')
+      .then(r => r.json())
+      .then(data => {
+        if (data && data.status && data.status !== 'idle') {
+          setUpdateProgress({
+            isUpdating: !!data.isUpdating,
+            percent: typeof data.percent === 'number' ? data.percent : 0,
+            status: data.status,
+            message: data.message || '',
+            downloadedBytes: data.downloadedBytes,
+            totalBytes: data.totalBytes,
+            error: data.error
+          });
+          if (Array.isArray(data.logs)) setUpdateLogs(data.logs);
+        }
       })
       .catch(() => {});
   };
@@ -597,21 +679,21 @@ export default function SettingsPage({ navigate, onSettingsSaved }: SettingsPage
                 <span>Actualización del Sistema (GitHub)</span>
               </h3>
               <p className="text-xs text-slate-400">
-                Mantiene RaspiMC actualizado descargando el código más reciente desde el repositorio oficial de GitHub (<code className="text-indigo-300 font-mono">D4mizr/WinMc</code>).
+                Mantiene RaspiMC actualizado descargando e instalando el paquete de código más reciente desde el repositorio oficial de GitHub (<code className="text-indigo-300 font-mono">D4mizr/WinMc</code>).
               </p>
             </div>
 
             <button
               type="button"
               onClick={handleTriggerUpdate}
-              disabled={isUpdating}
+              disabled={updateProgress.isUpdating}
               className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg shadow flex items-center gap-2 transition cursor-pointer shrink-0 self-start sm:self-center"
               id="trigger-update-btn"
             >
-              {isUpdating ? (
+              {updateProgress.isUpdating ? (
                 <>
                   <RefreshCw size={14} className="animate-spin" />
-                  <span>Actualizando...</span>
+                  <span>Actualizando ({updateProgress.percent}%)...</span>
                 </>
               ) : (
                 <>
@@ -622,18 +704,87 @@ export default function SettingsPage({ navigate, onSettingsSaved }: SettingsPage
             </button>
           </div>
 
-          {/* Update logs or status message */}
-          {updateStatusMsg && (
-            <div className={`p-3 rounded-lg border text-xs font-medium flex items-center gap-2 ${
-              updateStatusMsg.includes('Error') ? 'bg-rose-500/10 border-rose-500/20 text-rose-300' : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'
-            }`}>
-              {updateStatusMsg.includes('Error') ? <AlertCircle size={15} /> : <CheckCircle size={15} />}
-              <span>{updateStatusMsg}</span>
+          {/* Real-Time Progress Bar Component */}
+          {(updateProgress.isUpdating || updateProgress.status !== 'idle' || updateLogs.length > 0) && (
+            <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 space-y-3" id="settings-update-progress-card">
+              {/* Header and status info */}
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-slate-200 flex items-center gap-2">
+                  {updateProgress.isUpdating ? (
+                    <RefreshCw size={15} className="text-indigo-400 animate-spin" />
+                  ) : updateProgress.status === 'completed' ? (
+                    <CheckCircle size={15} className="text-emerald-400" />
+                  ) : updateProgress.status === 'error' ? (
+                    <AlertCircle size={15} className="text-rose-400" />
+                  ) : (
+                    <Info size={15} className="text-slate-400" />
+                  )}
+                  <span>
+                    {updateProgress.status === 'checking' && 'Verificando repositorio...'}
+                    {updateProgress.status === 'downloading' && 'Descargando paquete de actualización...'}
+                    {updateProgress.status === 'extracting' && 'Extrayendo y sobrescribiendo archivos...'}
+                    {updateProgress.status === 'installing' && 'Instalando dependencias y compilando...'}
+                    {updateProgress.status === 'completed' && '¡Proceso de actualización completado con éxito!'}
+                    {updateProgress.status === 'error' && 'Error durante la actualización'}
+                    {updateProgress.status === 'idle' && 'Progreso de actualización'}
+                  </span>
+                </span>
+
+                <div className="flex items-center gap-2">
+                  {updateProgress.downloadedBytes && updateProgress.downloadedBytes > 0 ? (
+                    <span className="text-[11px] font-mono text-slate-400 hidden sm:inline">
+                      {(updateProgress.downloadedBytes / (1024 * 1024)).toFixed(2)} MB
+                      {updateProgress.totalBytes ? ` / ${(updateProgress.totalBytes / (1024 * 1024)).toFixed(2)} MB` : ''}
+                    </span>
+                  ) : null}
+                  <span className={`text-[11px] font-mono font-bold px-2.5 py-0.5 rounded-md border ${
+                    updateProgress.status === 'completed'
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                      : updateProgress.status === 'error'
+                      ? 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+                      : 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20'
+                  }`}>
+                    {updateProgress.percent}%
+                  </span>
+                </div>
+              </div>
+
+              {/* Progress Track */}
+              <div className="w-full bg-slate-900 border border-slate-800 rounded-lg p-0.5 relative overflow-hidden shadow-inner">
+                <div
+                  className={`h-3 rounded-md transition-all duration-300 ease-out relative ${
+                    updateProgress.status === 'completed'
+                      ? 'bg-gradient-to-r from-emerald-500 via-teal-400 to-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.3)]'
+                      : updateProgress.status === 'error'
+                      ? 'bg-gradient-to-r from-rose-600 to-red-500 shadow-[0_0_12px_rgba(244,63,94,0.3)]'
+                      : 'bg-gradient-to-r from-indigo-600 via-purple-500 to-indigo-400 shadow-[0_0_12px_rgba(99,102,241,0.3)]'
+                  }`}
+                  style={{ width: `${Math.max(2, Math.min(100, updateProgress.percent))}%` }}
+                >
+                  {updateProgress.isUpdating && (
+                    <div className="absolute inset-0 bg-white/20 animate-pulse rounded-md" />
+                  )}
+                </div>
+              </div>
+
+              {/* Message Banner */}
+              {updateProgress.message && (
+                <p className={`text-xs ${
+                  updateProgress.status === 'error'
+                    ? 'text-rose-300 font-medium'
+                    : updateProgress.status === 'completed'
+                    ? 'text-emerald-300 font-medium'
+                    : 'text-slate-300'
+                }`}>
+                  {updateProgress.message}
+                </p>
+              )}
             </div>
           )}
 
+          {/* Terminal log viewer */}
           {updateLogs.length > 0 && (
-            <div className="bg-slate-950 p-3 rounded-lg border border-slate-850 font-mono text-[11px] text-slate-400 space-y-1 max-h-40 overflow-y-auto">
+            <div className="bg-slate-950 p-3 rounded-lg border border-slate-850 font-mono text-[11px] text-slate-400 space-y-1 max-h-44 overflow-y-auto" id="settings-update-logs-viewer">
               {updateLogs.map((log, idx) => (
                 <p key={idx} className="leading-tight">{log}</p>
               ))}

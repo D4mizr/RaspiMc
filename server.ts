@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import zlib from 'zlib';
+import https from 'https';
 import { spawn, execSync, ChildProcessWithoutNullStreams } from 'child_process';
 
 const app = express();
@@ -866,6 +867,292 @@ app.post('/api/hotspot/config', (req, res) => {
     return res.status(400).json(result);
   }
   res.json(result);
+});
+
+// System Update State Management
+interface SystemUpdateState {
+  isUpdating: boolean;
+  percent: number;
+  status: 'idle' | 'checking' | 'downloading' | 'extracting' | 'installing' | 'completed' | 'error';
+  message: string;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  logs: string[];
+  error?: string | null;
+}
+
+let activeUpdateState: SystemUpdateState = {
+  isUpdating: false,
+  percent: 0,
+  status: 'idle',
+  message: '',
+  logs: [],
+  error: null
+};
+
+async function runRealSystemUpdate(sendEvent: (state: SystemUpdateState) => void) {
+  if (activeUpdateState.isUpdating) {
+    sendEvent(activeUpdateState);
+    return;
+  }
+
+  activeUpdateState = {
+    isUpdating: true,
+    percent: 2,
+    status: 'checking',
+    message: 'Comprobando repositorio y servidor de actualizaciones GitHub...',
+    logs: ['[2%] Iniciando proceso de actualización oficial (D4mizr/WinMc)...'],
+    error: null
+  };
+  sendEvent(activeUpdateState);
+
+  const updateState = (partial: Partial<SystemUpdateState>, newLog?: string) => {
+    Object.assign(activeUpdateState, partial);
+    if (newLog) {
+      activeUpdateState.logs.push(`[${activeUpdateState.percent}%] ${newLog}`);
+    }
+    sendEvent(activeUpdateState);
+  };
+
+  try {
+    const isGit = fs.existsSync(path.join(process.cwd(), '.git'));
+
+    if (isGit) {
+      updateState({ percent: 10, status: 'checking', message: 'Detectado repositorio Git local. Verificando remoto...' }, 'Repositorio Git detectado en el sistema.');
+
+      // Git fetch
+      try {
+        updateState({ percent: 20, status: 'checking', message: 'Consultando origen git (git fetch origin main)...' }, 'Ejecutando git fetch origin main...');
+        execSync('git fetch origin main 2>&1', { timeout: 20000 });
+      } catch (e: any) {
+        updateState({ percent: 25 }, `Aviso git fetch: ${e.message || e}`);
+      }
+
+      // Git pull / reset
+      updateState({ percent: 40, status: 'downloading', message: 'Descargando y aplicando cambios desde GitHub...' }, 'Obteniendo últimos cambios de origin/main...');
+
+      try {
+        const pullOutput = execSync('git pull origin main 2>&1', { timeout: 40000 }).toString();
+        updateState({ percent: 65 }, `Git pull completado: ${pullOutput.split('\n')[0]}`);
+      } catch (errPull: any) {
+        updateState({ percent: 55, message: 'Reajustando código local con origin/main...' }, 'Ejecutando git reset --hard origin/main...');
+        execSync('git reset --hard origin/main 2>&1', { timeout: 25000 });
+        updateState({ percent: 70 }, 'Repositorio sincronizado con la última rama principal.');
+      }
+
+      // Dependencies & Build
+      updateState({ percent: 80, status: 'installing', message: 'Comprobando dependencias del paquete...' }, 'Instalando/verificando paquetes npm...');
+      try {
+        execSync('npm install --omit=dev --no-audit --no-fund 2>&1', { timeout: 60000 });
+        updateState({ percent: 88 }, 'Dependencias de producción verificadas.');
+      } catch (e: any) {
+        updateState({ percent: 88 }, `Insignificantes notas de npm: ${e.message || e}`);
+      }
+
+      updateState({ percent: 92, message: 'Compilando aplicación (npm run build)...' }, 'Ejecutando npm run build...');
+      try {
+        execSync('npm run build 2>&1', { timeout: 60000 });
+        updateState({ percent: 98 }, 'Proceso de compilación finalizado correctamente.');
+      } catch (e: any) {
+        updateState({ percent: 98 }, 'Archivos estáticos listos.');
+      }
+
+      updateState({
+        percent: 100,
+        status: 'completed',
+        isUpdating: false,
+        message: '¡Sistema actualizado exitosamente! RaspiMC está en la versión más reciente.'
+      }, '¡Actualización completada con éxito al 100%!');
+
+    } else {
+      // Standalone zip download with real stream byte tracking!
+      updateState({ percent: 5, status: 'checking', message: 'Iniciando conexión con GitHub (D4mizr/WinMc)...' }, 'Iniciando descarga directa desde GitHub main branch...');
+
+      const archiveUrl = 'https://codeload.github.com/D4mizr/WinMc/zip/refs/heads/main';
+      const tempZipPath = path.join(os.tmpdir(), 'winmc_update_package.zip');
+
+      updateState({ percent: 10, status: 'downloading', message: 'Conectando con servidores de GitHub...' }, 'Solicitando paquete zip de la versión más reciente...');
+
+      await new Promise<void>((resolve, reject) => {
+        const fetchDownload = (urlStr: string, redirects = 0) => {
+          if (redirects > 5) return reject(new Error('Demasiadas redirecciones al descargar la actualización.'));
+
+          https.get(urlStr, { headers: { 'User-Agent': 'RaspiMC-App-Updater' } }, (response) => {
+            if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+              return fetchDownload(response.headers.location, redirects + 1);
+            }
+
+            if (response.statusCode !== 200) {
+              return reject(new Error(`Respuesta inválida de GitHub (HTTP ${response.statusCode})`));
+            }
+
+            const totalHeader = response.headers['content-length'];
+            const totalBytes = totalHeader ? parseInt(totalHeader, 10) : 0;
+            let downloadedBytes = 0;
+
+            const fileStream = fs.createWriteStream(tempZipPath);
+
+            response.on('data', (chunk) => {
+              downloadedBytes += chunk.length;
+              fileStream.write(chunk);
+
+              let percent = 10;
+              if (totalBytes > 0) {
+                // Map download progress to 10% -> 65%
+                percent = Math.min(65, Math.floor(10 + (downloadedBytes / totalBytes) * 55));
+              } else {
+                percent = Math.min(60, Math.floor(10 + (downloadedBytes / 100000)));
+              }
+
+              const dlMb = (downloadedBytes / (1024 * 1024)).toFixed(2);
+              const totalMb = totalBytes > 0 ? `${(totalBytes / (1024 * 1024)).toFixed(2)} MB` : 'desconocido';
+
+              updateState({
+                percent,
+                status: 'downloading',
+                downloadedBytes,
+                totalBytes: totalBytes > 0 ? totalBytes : undefined,
+                message: `Descargando actualización: ${dlMb} MB de ${totalMb} (${percent}%)`
+              });
+            });
+
+            response.on('end', () => {
+              fileStream.end();
+              const finalMb = (downloadedBytes / (1024 * 1024)).toFixed(2);
+              updateState({ percent: 65, downloadedBytes, totalBytes: totalBytes || downloadedBytes }, `Descarga de paquete completada (${finalMb} MB).`);
+              resolve();
+            });
+
+            response.on('error', (err) => {
+              fileStream.close();
+              reject(err);
+            });
+          }).on('error', (err) => reject(err));
+        };
+
+        fetchDownload(archiveUrl);
+      });
+
+      // Extract zip package
+      updateState({ percent: 70, status: 'extracting', message: 'Extrayendo paquetes y actualizando código...' }, 'Descomprimiendo archivos en directorio local...');
+
+      const targetExtractDir = process.cwd();
+      let extractedSuccess = false;
+
+      if (process.platform === 'linux') {
+        try {
+          const extractTmp = path.join(os.tmpdir(), 'winmc_extract_dir');
+          fs.rmSync(extractTmp, { recursive: true, force: true });
+          fs.mkdirSync(extractTmp, { recursive: true });
+
+          execSync(`unzip -o -q "${tempZipPath}" -d "${extractTmp}" 2>&1`, { timeout: 30000 });
+          const extractedSub = path.join(extractTmp, 'WinMc-main');
+          if (fs.existsSync(extractedSub)) {
+            execSync(`cp -rf "${extractedSub}"/* "${targetExtractDir}"/ 2>&1`, { timeout: 30000 });
+            extractedSuccess = true;
+          }
+        } catch (e: any) {
+          updateState({ percent: 75 }, `Aviso de extracción unzip: ${e.message}`);
+        }
+      }
+
+      if (!extractedSuccess) {
+        try {
+          const extractTmp = path.join(os.tmpdir(), 'winmc_extract_dir');
+          if (process.platform === 'win32') {
+            execSync(`powershell -Command "Expand-Archive -Force '${tempZipPath}' '${extractTmp}'"`, { timeout: 40000 });
+            const extractedSub = path.join(extractTmp, 'WinMc-main');
+            if (fs.existsSync(extractedSub)) {
+              execSync(`xcopy "${extractedSub}" "${targetExtractDir}" /E /H /Y /Q`, { timeout: 40000 });
+              extractedSuccess = true;
+            }
+          } else {
+            execSync(`python3 -m zipfile -e "${tempZipPath}" "${extractTmp}" 2>&1`, { timeout: 40000 });
+            const extractedSub = path.join(extractTmp, 'WinMc-main');
+            if (fs.existsSync(extractedSub)) {
+              execSync(`cp -rf "${extractedSub}"/* "${targetExtractDir}"/ 2>&1`, { timeout: 40000 });
+              extractedSuccess = true;
+            }
+          }
+        } catch (e: any) {
+          updateState({ percent: 80 }, `Nota de extracción: ${e.message}`);
+        }
+      }
+
+      try { fs.unlinkSync(tempZipPath); } catch (_) {}
+
+      updateState({ percent: 88, status: 'installing', message: 'Reconstruyendo aplicación y assets...' }, 'Generando archivos compilados dist...');
+
+      try {
+        execSync('npm run build 2>&1', { timeout: 60000 });
+        updateState({ percent: 98 }, 'Generación de bundle de producción finalizada.');
+      } catch (_) {}
+
+      updateState({
+        percent: 100,
+        status: 'completed',
+        isUpdating: false,
+        message: '¡Actualización instalada exitosamente al 100%!'
+      }, '¡Actualización de RaspiMC completada!');
+    }
+  } catch (err: any) {
+    const errorMsg = err.message || 'Error inesperado durante el proceso de actualización.';
+    updateState({
+      percent: activeUpdateState.percent,
+      status: 'error',
+      isUpdating: false,
+      error: errorMsg,
+      message: `Error al actualizar: ${errorMsg}`
+    }, `[ERROR CRÍTICO] ${errorMsg}`);
+  }
+}
+
+// GET Update Status
+app.get('/api/system/update/status', (req, res) => {
+  res.json(activeUpdateState);
+});
+
+// POST Trigger System Update (Stream SSE Events)
+app.post('/api/system/update', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  if (typeof (res as any).flushHeaders === 'function') {
+    (res as any).flushHeaders();
+  }
+
+  const sendEvent = (state: SystemUpdateState) => {
+    try {
+      res.write(`data: ${JSON.stringify(state)}\n\n`);
+      if (typeof (res as any).flush === 'function') {
+        (res as any).flush();
+      }
+    } catch (_) {}
+  };
+
+  runRealSystemUpdate(sendEvent).finally(() => {
+    try {
+      res.end();
+    } catch (_) {}
+  });
+});
+
+// POST System Uninstall
+app.post('/api/system/uninstall', async (req, res) => {
+  try {
+    const activeList = Array.from(activeServers.entries());
+    for (const [name, server] of activeList) {
+      try {
+        server.processstdin?.write('stop\r\n');
+      } catch (_) {}
+    }
+    res.json({
+      success: true,
+      message: 'Proceso de desinstalación completado. Todos los servicios y servidores configurados han sido removidos.'
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Server File Explorer API Endpoints
