@@ -28,6 +28,14 @@ export interface SystemStatus {
   adapterName?: string | null;
   serversDir?: string;
   serversDirs?: string[];
+  hotspot?: {
+    active: boolean;
+    ssid: string;
+    password: string;
+    ip: string;
+    interface: string;
+    clientsCount: number;
+  };
 }
 
 export type ServerStatus = 'online' | 'offline' | 'starting' | 'stopping';

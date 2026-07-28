@@ -509,10 +509,50 @@ function getStorageStats(): { totalGb: number; usedGb: number } {
   return { totalGb: 32.0, usedGb: 12.4 };
 }
 
-let hotspotConfig = {
-  ssid: 'RaspiMC-AP',
-  password: 'RaspberryMinecraft'
-};
+const HOTSPOT_CONFIG_FILE = (process.platform === 'linux' && fs.existsSync('/var/lib/raspimc'))
+  ? '/var/lib/raspimc/hotspot.json'
+  : path.join(os.homedir(), '.raspimc-hotspot.json');
+
+interface HotspotConfigData {
+  ssid: string;
+  password: string;
+  enabledOnBoot?: boolean;
+}
+
+function loadHotspotConfig(): HotspotConfigData {
+  const defaultConfig: HotspotConfigData = {
+    ssid: 'RaspiMC-AP',
+    password: 'RaspberryMinecraft',
+    enabledOnBoot: false
+  };
+
+  if (fs.existsSync(HOTSPOT_CONFIG_FILE)) {
+    try {
+      const content = fs.readFileSync(HOTSPOT_CONFIG_FILE, 'utf8');
+      const parsed = JSON.parse(content);
+      return {
+        ssid: (parsed.ssid && typeof parsed.ssid === 'string' && parsed.ssid.trim()) ? parsed.ssid.trim() : defaultConfig.ssid,
+        password: (parsed.password && typeof parsed.password === 'string' && parsed.password.length >= 8) ? parsed.password : defaultConfig.password,
+        enabledOnBoot: !!parsed.enabledOnBoot
+      };
+    } catch (_) {}
+  }
+  return defaultConfig;
+}
+
+function saveHotspotConfig(cfg: HotspotConfigData) {
+  try {
+    const parent = path.dirname(HOTSPOT_CONFIG_FILE);
+    if (!fs.existsSync(parent)) {
+      fs.mkdirSync(parent, { recursive: true });
+    }
+    fs.writeFileSync(HOTSPOT_CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Error saving hotspot config:', err);
+  }
+}
+
+let hotspotConfig = loadHotspotConfig();
 
 function getHotspotStatus() {
   let active = false;
@@ -520,27 +560,38 @@ function getHotspotStatus() {
   let iface = 'wlan0';
   let clientsCount = 0;
 
-  try {
-    const out = execSync('nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null', { timeout: 1500 }).toString();
-    if (out.includes('RaspiMC-AP') || out.includes('Hotspot') || out.includes('802-11-wireless')) {
-      active = true;
-    }
-
-    if (!active) {
-      const ipAddrOut = execSync('ip addr show wlan0 2>/dev/null || true', { timeout: 1000 }).toString();
-      if (ipAddrOut.includes('192.168.4.')) {
-        active = true;
+  if (process.platform === 'linux') {
+    try {
+      const out = execSync('nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null', { timeout: 2000 }).toString();
+      const lines = out.split('\n');
+      for (const line of lines) {
+        if (line.includes(hotspotConfig.ssid) || line.includes('Hotspot') || (line.includes('802-11-wireless') && line.includes('wlan0'))) {
+          active = true;
+          break;
+        }
       }
-    }
 
-    if (active) {
-      try {
-        const arpOut = execSync('arp -a 2>/dev/null || cat /proc/net/arp 2>/dev/null', { timeout: 1000 }).toString();
-        const clientLines = arpOut.split('\n').filter(l => l.includes('wlan0') && !l.includes('00:00:00:00:00:00'));
-        clientsCount = clientLines.length;
-      } catch (_) {}
-    }
-  } catch (_) {}
+      if (!active) {
+        const ipAddrOut = execSync('ip addr show wlan0 2>/dev/null || true', { timeout: 1500 }).toString();
+        if (ipAddrOut.includes('192.168.4.') || ipAddrOut.includes('10.42.0.')) {
+          active = true;
+        }
+      }
+
+      if (active) {
+        try {
+          const ipMatch = execSync("ip -4 addr show wlan0 2>/dev/null | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}'", { timeout: 1000 }).toString().trim();
+          if (ipMatch) ip = ipMatch.split('\n')[0];
+        } catch (_) {}
+
+        try {
+          const arpOut = execSync('ip neighbor show dev wlan0 2>/dev/null || cat /proc/net/arp 2>/dev/null', { timeout: 1000 }).toString();
+          const clientLines = arpOut.split('\n').filter(l => l.includes('wlan0') && !l.includes('00:00:00:00:00:00') && (l.includes('REACHABLE') || l.includes('STALE') || l.includes('DELAY') || l.includes('0x2')));
+          clientsCount = clientLines.length;
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
 
   return {
     active,
@@ -608,31 +659,109 @@ function searchServerFilesRecursively(rootPath: string, currentPath: string, que
   } catch (_) {}
 }
 
-function toggleHotspot(enable: boolean, ssid?: string, password?: string) {
-  if (ssid) hotspotConfig.ssid = ssid;
-  if (password && password.length >= 8) hotspotConfig.password = password;
+function applyHotspotOnSystem(ssid: string, password: string): { success: boolean; message: string } {
+  if (process.platform !== 'linux') {
+    return { success: true, message: `Punto de acceso Wi-Fi "${ssid}" configurado (Simulado en entorno no-Linux).` };
+  }
 
   try {
-    if (enable) {
+    try {
+      execSync(`nmcli con modify "${ssid}" 802-11-wireless.mode ap 802-11-wireless.band bg ipv4.method shared wifi-sec.key-mgmt wpa-psk wifi-sec.psk "${password}" 2>/dev/null`, { timeout: 4000 });
+    } catch (_) {
       try {
-        execSync(`nmcli con show "${hotspotConfig.ssid}" >/dev/null 2>&1 || nmcli con add type wifi ifname wlan0 mode ap con-name "${hotspotConfig.ssid}" ssid "${hotspotConfig.ssid}" 2>/dev/null`, { timeout: 3000 });
-        execSync(`nmcli con modify "${hotspotConfig.ssid}" 802-11-wireless.mode ap 802-11-wireless.band bg ipv4.method shared wifi-sec.key-mgmt wpa-psk wifi-sec.psk "${hotspotConfig.password}" 2>/dev/null`, { timeout: 3000 });
-        execSync(`nmcli con up "${hotspotConfig.ssid}" 2>/dev/null`, { timeout: 5000 });
-      } catch (e1) {
-        execSync(`nmcli device wifi hotspot ifname wlan0 ssid "${hotspotConfig.ssid}" password "${hotspotConfig.password}" 2>/dev/null`, { timeout: 5000 });
+        execSync(`nmcli con delete "${ssid}" 2>/dev/null || true`, { timeout: 2000 });
+        execSync(`nmcli con add type wifi ifname wlan0 mode ap con-name "${ssid}" ssid "${ssid}" 802-11-wireless.band bg ipv4.method shared wifi-sec.key-mgmt wpa-psk wifi-sec.psk "${password}" 2>/dev/null`, { timeout: 4000 });
+      } catch (e2) {
+        execSync(`nmcli device wifi hotspot ifname wlan0 ssid "${ssid}" password "${password}" 2>/dev/null`, { timeout: 5000 });
       }
-      return { success: true, message: `Punto de acceso Wi-Fi "${hotspotConfig.ssid}" activado correctamente.`, status: getHotspotStatus() };
-    } else {
-      try {
-        execSync(`nmcli con down "${hotspotConfig.ssid}" 2>/dev/null || nmcli device disconnect wlan0 2>/dev/null`, { timeout: 3000 });
-      } catch (_) {}
-      return { success: true, message: 'Punto de acceso Wi-Fi desactivado.', status: getHotspotStatus() };
     }
-  } catch (error: any) {
+
+    execSync(`nmcli con up "${ssid}" 2>/dev/null || nmcli device wifi hotspot ifname wlan0 ssid "${ssid}" password "${password}" 2>/dev/null`, { timeout: 6000 });
+
+    return { success: true, message: `Punto de acceso Wi-Fi "${ssid}" activado correctamente en Linux / Raspberry Pi OS.` };
+  } catch (err: any) {
+    return { success: false, message: `Error al aplicar punto de acceso en el sistema: ${err.message}` };
+  }
+}
+
+function disableHotspotOnSystem(ssid: string): { success: boolean; message: string } {
+  if (process.platform !== 'linux') {
+    return { success: true, message: 'Punto de acceso Wi-Fi desactivado.' };
+  }
+
+  try {
+    execSync(`nmcli con down "${ssid}" 2>/dev/null || nmcli device disconnect wlan0 2>/dev/null || true`, { timeout: 4000 });
+    return { success: true, message: 'Punto de acceso Wi-Fi desactivado correctamente.' };
+  } catch (err: any) {
+    return { success: false, message: `Error al desactivar punto de acceso: ${err.message}` };
+  }
+}
+
+function toggleHotspot(enable: boolean, newSsid?: string, newPassword?: string) {
+  if (newSsid && newSsid.trim()) {
+    hotspotConfig.ssid = newSsid.trim();
+  }
+  if (newPassword) {
+    if (newPassword.length < 8) {
+      return { success: false, message: 'La contraseña del Hotspot Wi-Fi debe tener al menos 8 caracteres (WPA2 PSK).', status: getHotspotStatus() };
+    }
+    hotspotConfig.password = newPassword;
+  }
+
+  saveHotspotConfig(hotspotConfig);
+
+  if (enable) {
+    const res = applyHotspotOnSystem(hotspotConfig.ssid, hotspotConfig.password);
+    return {
+      success: res.success,
+      message: res.message,
+      status: getHotspotStatus()
+    };
+  } else {
+    const res = disableHotspotOnSystem(hotspotConfig.ssid);
+    return {
+      success: res.success,
+      message: res.message,
+      status: getHotspotStatus()
+    };
+  }
+}
+
+function updateHotspotSettings(ssid: string, password: string) {
+  if (!ssid || !ssid.trim()) {
+    return { success: false, message: 'El nombre del punto de acceso (SSID) no puede estar vacío.' };
+  }
+  if (!password || password.length < 8) {
+    return { success: false, message: 'La contraseña debe tener al menos 8 caracteres (WPA2 PSK).' };
+  }
+
+  const cleanSsid = ssid.trim();
+  const cleanPassword = password;
+  const currentStatus = getHotspotStatus();
+  const wasActive = currentStatus.active;
+
+  hotspotConfig.ssid = cleanSsid;
+  hotspotConfig.password = cleanPassword;
+  saveHotspotConfig(hotspotConfig);
+
+  if (wasActive) {
+    disableHotspotOnSystem(currentStatus.ssid);
+    const applyRes = applyHotspotOnSystem(cleanSsid, cleanPassword);
+    return {
+      success: applyRes.success,
+      message: `Configuración actualizada y reaplicada en el punto de acceso. ${applyRes.message}`,
+      status: getHotspotStatus()
+    };
+  } else {
+    if (process.platform === 'linux') {
+      try {
+        execSync(`nmcli con modify "${cleanSsid}" 802-11-wireless.mode ap 802-11-wireless.band bg ipv4.method shared wifi-sec.key-mgmt wpa-psk wifi-sec.psk "${cleanPassword}" 2>/dev/null`, { timeout: 3000 });
+      } catch (_) {}
+    }
     return {
       success: true,
-      message: enable ? `Hotspot configurado para "${hotspotConfig.ssid}"` : 'Hotspot desactivado',
-      status: { ...getHotspotStatus(), active: enable }
+      message: `Configuración guardada exitosamente. SSID: "${cleanSsid}". Se aplicará la nueva contraseña cuando actives el Hotspot.`,
+      status: getHotspotStatus()
     };
   }
 }
@@ -724,6 +853,18 @@ app.get('/api/hotspot/status', (req, res) => {
 app.post('/api/hotspot/toggle', (req, res) => {
   const { enable, ssid, password } = req.body;
   const result = toggleHotspot(!!enable, ssid, password);
+  if (!result.success) {
+    return res.status(400).json(result);
+  }
+  res.json(result);
+});
+
+app.post('/api/hotspot/config', (req, res) => {
+  const { ssid, password } = req.body;
+  const result = updateHotspotSettings(ssid, password);
+  if (!result.success) {
+    return res.status(400).json(result);
+  }
   res.json(result);
 });
 

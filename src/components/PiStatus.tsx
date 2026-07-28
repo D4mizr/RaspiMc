@@ -15,7 +15,13 @@ import {
   Wifi,
   Radio,
   CheckCircle2,
-  XCircle
+  XCircle,
+  Settings,
+  Eye,
+  EyeOff,
+  Key,
+  Save,
+  AlertCircle
 } from 'lucide-react';
 import { SystemStatus } from '../types';
 
@@ -31,10 +37,22 @@ export default function PiStatus({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isTogglingHotspot, setIsTogglingHotspot] = useState(false);
   const [hotspotMsg, setHotspotMsg] = useState<string | null>(null);
+  const [hotspotError, setHotspotError] = useState<string | null>(null);
+
+  // Hotspot Configuration state
+  const [showHotspotConfig, setShowHotspotConfig] = useState(false);
+  const [ssidInput, setSsidInput] = useState(initialStatus.hotspot?.ssid || 'RaspiMC-AP');
+  const [passwordInput, setPasswordInput] = useState(initialStatus.hotspot?.password || 'RaspberryMinecraft');
+  const [showPassword, setShowPassword] = useState(false);
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
 
   // Synchronize state with incoming status props
   useEffect(() => {
     setStatus(initialStatus);
+    if (initialStatus.hotspot) {
+      setSsidInput(initialStatus.hotspot.ssid);
+      setPasswordInput(initialStatus.hotspot.password);
+    }
   }, [initialStatus]);
 
   const handleManualRefresh = () => {
@@ -51,6 +69,7 @@ export default function PiStatus({
   const handleToggleHotspot = (enable: boolean) => {
     setIsTogglingHotspot(true);
     setHotspotMsg(null);
+    setHotspotError(null);
     fetch('/api/hotspot/toggle', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -58,17 +77,66 @@ export default function PiStatus({
     })
       .then(r => r.json())
       .then(res => {
+        if (!res.success) {
+          setHotspotError(res.message);
+        } else {
+          setHotspotMsg(res.message);
+        }
+        if (res.status) {
+          setStatus(prev => ({ ...prev, hotspot: res.status }));
+        }
+        setTimeout(() => {
+          setHotspotMsg(null);
+          setHotspotError(null);
+        }, 5000);
+      })
+      .catch(() => {
+        setHotspotError('Error al cambiar estado del Hotspot Wi-Fi');
+        setTimeout(() => setHotspotError(null), 5000);
+      })
+      .finally(() => setIsTogglingHotspot(false));
+  };
+
+  const handleSaveHotspotConfig = (e: React.FormEvent) => {
+    e.preventDefault();
+    setHotspotError(null);
+    setHotspotMsg(null);
+
+    if (!ssidInput.trim()) {
+      setHotspotError('El nombre SSID del Hotspot no puede estar vacío.');
+      return;
+    }
+
+    if (!passwordInput || passwordInput.length < 8) {
+      setHotspotError('La contraseña de Wi-Fi debe contener al menos 8 caracteres (requerido por WPA2-PSK).');
+      return;
+    }
+
+    setIsSavingConfig(true);
+    fetch('/api/hotspot/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ssid: ssidInput.trim(), password: passwordInput })
+    })
+      .then(async (r) => {
+        const data = await r.json();
+        if (!r.ok || !data.success) {
+          throw new Error(data.message || 'Error al actualizar la configuración del hotspot');
+        }
+        return data;
+      })
+      .then((res) => {
         setHotspotMsg(res.message);
         if (res.status) {
           setStatus(prev => ({ ...prev, hotspot: res.status }));
         }
-        setTimeout(() => setHotspotMsg(null), 4000);
+        setShowHotspotConfig(false);
+        setTimeout(() => setHotspotMsg(null), 6000);
       })
-      .catch(() => {
-        setHotspotMsg('Error al cambiar estado del Hotspot Wi-Fi');
-        setTimeout(() => setHotspotMsg(null), 4000);
+      .catch((err: any) => {
+        setHotspotError(err.message || 'No se pudo guardar la configuración del hotspot.');
       })
-      .finally(() => setIsTogglingHotspot(false));
+      .finally(() => setIsSavingConfig(false));
   };
 
   // Convert CPU history array into SVG coordinates for a sparkline
@@ -246,59 +314,182 @@ export default function PiStatus({
       </div>
 
       {/* Hotspot AP Control Banner */}
-      <div className="bg-slate-900/30 p-5 rounded-2xl border border-slate-800/80 flex flex-col md:flex-row items-start md:items-center justify-between gap-4" id="hotspot-banner">
-        <div className="flex items-center gap-3">
-          <div className={`p-3 rounded-xl border ${
-            status.hotspot?.active 
-              ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-400' 
-              : 'bg-slate-800/50 border-slate-700/50 text-slate-500'
-          }`}>
-            <Radio size={22} className={status.hotspot?.active ? 'animate-pulse' : ''} />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h3 className="font-bold text-sm text-slate-100">Hotspot Wi-Fi Integrado (Punto de Acceso)</h3>
-              <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
-                status.hotspot?.active
-                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                  : 'bg-slate-850 text-slate-400 border-slate-800'
-              }`}>
-                {status.hotspot?.active ? 'ACTIVADO' : 'DESACTIVADO'}
-              </span>
+      <div className="bg-slate-900/30 rounded-2xl border border-slate-800/80 overflow-hidden" id="hotspot-banner">
+        <div className="p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className={`p-3 rounded-xl border ${
+              status.hotspot?.active 
+                ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-400' 
+                : 'bg-slate-800/50 border-slate-700/50 text-slate-500'
+            }`}>
+              <Radio size={22} className={status.hotspot?.active ? 'animate-pulse' : ''} />
             </div>
-            <p className="text-xs text-slate-400 mt-0.5">
-              SSID: <strong className="text-slate-200 font-mono">{status.hotspot?.ssid || 'RaspiMC-AP'}</strong>
-              {status.hotspot?.active && (
-                <> | IP Hotspot: <strong className="text-indigo-400 font-mono">{status.hotspot?.ip || '192.168.4.1'}</strong> | Clientes: {status.hotspot?.clientsCount || 0}</>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="font-bold text-sm text-slate-100">Hotspot Wi-Fi Integrado (Punto de Acceso)</h3>
+                <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
+                  status.hotspot?.active
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                    : 'bg-slate-850 text-slate-400 border-slate-800'
+                }`}>
+                  {status.hotspot?.active ? 'ACTIVADO' : 'DESACTIVADO'}
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 mt-0.5 flex flex-wrap items-center gap-x-2">
+                <span>SSID: <strong className="text-slate-200 font-mono">{status.hotspot?.ssid || 'RaspiMC-AP'}</strong></span>
+                <span className="text-slate-600">|</span>
+                <span>Clave: <strong className="text-slate-300 font-mono">{showPassword ? (status.hotspot?.password || 'RaspberryMinecraft') : '••••••••'}</strong></span>
+                {status.hotspot?.active && (
+                  <>
+                    <span className="text-slate-600">|</span>
+                    <span>IP: <strong className="text-indigo-400 font-mono">{status.hotspot?.ip || '192.168.4.1'}</strong></span>
+                    <span className="text-slate-600">|</span>
+                    <span>Clientes: <strong className="text-emerald-400 font-mono">{status.hotspot?.clientsCount || 0}</strong></span>
+                  </>
+                )}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2.5 w-full md:w-auto justify-end">
+            <button
+              onClick={() => {
+                setShowHotspotConfig(!showHotspotConfig);
+                setSsidInput(status.hotspot?.ssid || 'RaspiMC-AP');
+                setPasswordInput(status.hotspot?.password || 'RaspberryMinecraft');
+                setHotspotError(null);
+              }}
+              className="px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer border bg-slate-800 hover:bg-slate-750 border-slate-700 text-slate-200"
+              id="configure-hotspot-btn"
+            >
+              <Settings size={14} className="text-slate-400" />
+              <span>{showHotspotConfig ? 'Ocultar Ajustes' : 'Configurar Hotspot'}</span>
+            </button>
+
+            <button
+              onClick={() => handleToggleHotspot(!status.hotspot?.active)}
+              disabled={isTogglingHotspot}
+              className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition cursor-pointer border ${
+                status.hotspot?.active
+                  ? 'bg-rose-500/10 hover:bg-rose-500/20 border-rose-500/20 text-rose-300'
+                  : 'bg-indigo-600 hover:bg-indigo-700 border-indigo-500 text-white shadow'
+              }`}
+              id="toggle-hotspot-btn"
+            >
+              {isTogglingHotspot ? (
+                <RefreshCw size={14} className="animate-spin" />
+              ) : status.hotspot?.active ? (
+                <XCircle size={14} />
+              ) : (
+                <Wifi size={14} />
               )}
-            </p>
+              <span>{status.hotspot?.active ? 'Desactivar Hotspot' : 'Activar Hotspot Wi-Fi'}</span>
+            </button>
           </div>
         </div>
 
-        <div className="flex items-center gap-3 w-full md:w-auto justify-end">
-          {hotspotMsg && (
-            <span className="text-xs text-indigo-300 font-mono animate-fadeIn">{hotspotMsg}</span>
-          )}
-          <button
-            onClick={() => handleToggleHotspot(!status.hotspot?.active)}
-            disabled={isTogglingHotspot}
-            className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition cursor-pointer border ${
-              status.hotspot?.active
-                ? 'bg-rose-500/10 hover:bg-rose-500/20 border-rose-500/20 text-rose-300'
-                : 'bg-indigo-600 hover:bg-indigo-700 border-indigo-500 text-white shadow'
-            }`}
-            id="toggle-hotspot-btn"
-          >
-            {isTogglingHotspot ? (
-              <RefreshCw size={14} className="animate-spin" />
-            ) : status.hotspot?.active ? (
-              <XCircle size={14} />
-            ) : (
-              <Wifi size={14} />
-            )}
-            <span>{status.hotspot?.active ? 'Desactivar Hotspot' : 'Activar Hotspot Wi-Fi'}</span>
-          </button>
-        </div>
+        {/* Global Messages / Alerts for Hotspot */}
+        {(hotspotMsg || hotspotError) && (
+          <div className={`px-5 py-2.5 text-xs font-medium flex items-center gap-2 border-t ${
+            hotspotError 
+              ? 'bg-rose-500/10 border-rose-500/20 text-rose-300' 
+              : 'bg-indigo-500/10 border-indigo-500/20 text-indigo-300'
+          }`}>
+            {hotspotError ? <AlertCircle size={15} className="shrink-0 text-rose-400" /> : <CheckCircle2 size={15} className="shrink-0 text-indigo-400" />}
+            <span>{hotspotError || hotspotMsg}</span>
+          </div>
+        )}
+
+        {/* Hotspot Configuration Form Panel */}
+        {showHotspotConfig && (
+          <form onSubmit={handleSaveHotspotConfig} className="p-5 border-t border-slate-800/80 bg-slate-950/40 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800/60">
+              <div className="flex items-center gap-2 text-slate-200 text-xs font-bold uppercase tracking-wider">
+                <Key size={14} className="text-indigo-400" />
+                <span>Configuración de Punto de Acceso (Raspberry Pi OS)</span>
+              </div>
+              <span className="text-[11px] text-slate-500 font-mono">Modo Wi-Fi AP (nmcli)</span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* SSID Field */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-slate-300 block">
+                  Nombre del Punto de Acceso (SSID)
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={ssidInput}
+                    onChange={(e) => setSsidInput(e.target.value)}
+                    placeholder="Ej. RaspiMC-AP"
+                    required
+                    maxLength={32}
+                    className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-3.5 py-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+                <p className="text-[11px] text-slate-500">Nombre de la red Wi-Fi visible para tus dispositivos.</p>
+              </div>
+
+              {/* Password Field */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-slate-300 block flex items-center justify-between">
+                  <span>Contraseña del Hotspot (WPA2-PSK)</span>
+                  <span className={`text-[10px] font-mono ${passwordInput.length >= 8 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    {passwordInput.length}/8+ caracteres
+                  </span>
+                </label>
+                <div className="relative flex items-center">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    value={passwordInput}
+                    onChange={(e) => setPasswordInput(e.target.value)}
+                    placeholder="Mínimo 8 caracteres"
+                    required
+                    minLength={8}
+                    maxLength={63}
+                    className="w-full bg-slate-900 border border-slate-700/80 rounded-xl pl-3.5 pr-10 py-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-indigo-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-2.5 p-1 text-slate-400 hover:text-slate-200 transition cursor-pointer"
+                    title={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                  >
+                    {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Debe tener al menos 8 caracteres. Se actualizará en NetworkManager (<code className="text-slate-400 font-mono">wifi-sec.psk</code>).
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-2">
+              <span className="text-[11px] text-slate-400 italic">
+                {status.hotspot?.active ? 'Si el hotspot está activo, se reiniciará para aplicar la nueva contraseña.' : 'La nueva contraseña se aplicará al activar el Hotspot.'}
+              </span>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowHotspotConfig(false)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingConfig || passwordInput.length < 8 || !ssidInput.trim()}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white flex items-center gap-1.5 transition cursor-pointer shadow border border-indigo-500"
+                >
+                  {isSavingConfig ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
+                  <span>{isSavingConfig ? 'Guardando en Linux...' : 'Guardar y Aplicar'}</span>
+                </button>
+              </div>
+            </div>
+          </form>
+        )}
       </div>
 
       {/* Host Specifications & System Panel */}
