@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   X, 
   Folder, 
@@ -24,7 +24,11 @@ import {
   Check, 
   HardDrive,
   Download,
-  Eye
+  Eye,
+  Upload,
+  UploadCloud,
+  FileUp,
+  AlertTriangle
 } from 'lucide-react';
 
 interface FileItem {
@@ -67,6 +71,16 @@ export function ServerFilesModal({ serverName, isOpen, onClose }: ServerFilesMod
   // Delete confirmation state
   const [itemToDelete, setItemToDelete] = useState<FileItem | null>(null);
 
+  // File Upload / Import State
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number; currentFileName: string; percent: number } | null>(null);
+  const [uploadStatusMsg, setUploadStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [isDraggingOver, setIsDraggingOver] = useState<boolean>(false);
+
+  // Conflicts State
+  const [conflictsToResolve, setConflictsToResolve] = useState<{ files: File[]; conflictNames: string[] } | null>(null);
+
   // Load directory items
   const loadDirectory = (subpath: string) => {
     setIsLoading(true);
@@ -94,6 +108,8 @@ export function ServerFilesModal({ serverName, isOpen, onClose }: ServerFilesMod
       setSearchQuery('');
       setSearchResults([]);
       setActiveEditingFile(null);
+      setUploadStatusMsg(null);
+      setConflictsToResolve(null);
       loadDirectory('/');
     }
   }, [isOpen, serverName]);
@@ -115,7 +131,7 @@ export function ServerFilesModal({ serverName, isOpen, onClose }: ServerFilesMod
           setSearchResults(data.results);
         }
       })
-      .catch(err => setErrorMsg('Error en la búsqueda de archivos'))
+      .catch(() => setErrorMsg('Error en la búsqueda de archivos'))
       .finally(() => setIsSearching(false));
   };
 
@@ -227,6 +243,139 @@ export function ServerFilesModal({ serverName, isOpen, onClose }: ServerFilesMod
       .catch(err => setErrorMsg(err.message));
   };
 
+  // READ FILE AS BASE64 PROMISE
+  const readFileAsBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        resolve(result);
+      };
+      reader.onerror = (error) => reject(error);
+      reader.readAsDataURL(file);
+    });
+  };
+
+  // START FILE UPLOAD FLOW
+  const handleSelectFilesClick = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  };
+
+  const handleFilesSelected = (files: File[]) => {
+    if (!files || files.length === 0) return;
+    setUploadStatusMsg(null);
+    checkAndUploadFiles(files, false);
+  };
+
+  const checkAndUploadFiles = async (files: File[], forceOverwrite: boolean) => {
+    if (files.length === 0) return;
+
+    // Check for conflicts if not forced overwrite
+    if (!forceOverwrite) {
+      try {
+        const fileNames = files.map(f => f.name);
+        const res = await fetch(`/api/servers/${encodeURIComponent(serverName)}/files/check-conflicts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subpath: currentPath, fileNames })
+        });
+        const data = await res.json();
+        if (data.conflicts && data.conflicts.length > 0) {
+          setConflictsToResolve({ files, conflictNames: data.conflicts });
+          return;
+        }
+      } catch (err) {
+        console.warn('Error checking conflicts, proceeding directly', err);
+      }
+    }
+
+    // Perform uploads
+    setIsUploading(true);
+    setConflictsToResolve(null);
+    let successCount = 0;
+    let failCount = 0;
+    let lastError = '';
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const percent = Math.round(((i + 0.5) / files.length) * 100);
+      setUploadProgress({
+        current: i + 1,
+        total: files.length,
+        currentFileName: file.name,
+        percent
+      });
+
+      try {
+        const fileData = await readFileAsBase64(file);
+        const res = await fetch(`/api/servers/${encodeURIComponent(serverName)}/files/upload`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            subpath: currentPath,
+            fileName: file.name,
+            fileData,
+            overwrite: forceOverwrite
+          })
+        });
+
+        if (!res.ok) {
+          const errJson = await res.json();
+          throw new Error(errJson.error || `Error al subir ${file.name}`);
+        }
+
+        successCount++;
+      } catch (err: any) {
+        failCount++;
+        lastError = err.message;
+      }
+    }
+
+    setIsUploading(false);
+    setUploadProgress(null);
+
+    if (successCount > 0) {
+      setUploadStatusMsg({
+        type: 'success',
+        text: `¡${successCount} archivo(s) importado(s) exitosamente en "${currentPath}"! ${failCount > 0 ? `(${failCount} fallidos: ${lastError})` : ''}`
+      });
+      loadDirectory(currentPath);
+      setTimeout(() => setUploadStatusMsg(null), 5000);
+    } else if (failCount > 0) {
+      setUploadStatusMsg({
+        type: 'error',
+        text: `No se pudieron importar los archivos: ${lastError}`
+      });
+    }
+  };
+
+  // DRAG & DROP HANDLERS
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isDraggingOver) setIsDraggingOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const droppedFiles = Array.from(e.dataTransfer.files) as File[];
+      handleFilesSelected(droppedFiles);
+    }
+  };
+
   if (!isOpen) return null;
 
   // Helper formatting
@@ -250,7 +399,7 @@ export function ServerFilesModal({ serverName, isOpen, onClose }: ServerFilesMod
     if (['.log', '.txt'].includes(ext)) {
       return <FileText className="text-slate-400 shrink-0" size={18} />;
     }
-    if (['.jar'].includes(ext)) {
+    if (['.jar', '.zip', '.tar', '.gz'].includes(ext)) {
       return <HardDrive className="text-purple-400 shrink-0" size={18} />;
     }
     return <FileText className="text-slate-500 shrink-0" size={18} />;
@@ -258,52 +407,106 @@ export function ServerFilesModal({ serverName, isOpen, onClose }: ServerFilesMod
 
   const isTextFile = (item: FileItem) => {
     if (item.isDirectory) return false;
-    const editableExtensions = ['.txt', '.yml', '.yaml', '.json', '.properties', '.log', '.sh', '.conf', '.toml', '.sk', '.xml', '.mcmeta', '.bat'];
-    return editableExtensions.includes(item.extension) || item.size < 100000;
+    const editableExts = [
+      '.yml', '.yaml', '.properties', '.json', '.txt', '.log', '.conf', 
+      '.toml', '.cfg', '.sh', '.bat', '.cmd', '.py', '.js', '.md', '.sk'
+    ];
+    return editableExts.includes(item.extension) || item.size < 2 * 1024 * 1024;
   };
 
-  // Breadcrumb path parts
   const pathParts = currentPath.split('/').filter(Boolean);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-950/80 backdrop-blur-sm animate-fadeIn" id="server-files-modal-backdrop">
-      <div className="w-full max-w-5xl h-[88vh] bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden" id="server-files-modal">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-950/85 backdrop-blur-md animate-fadeIn" id="server-files-modal">
+      
+      {/* Hidden File Input */}
+      <input
+        type="file"
+        multiple
+        ref={fileInputRef}
+        onChange={(e) => {
+          if (e.target.files) {
+            handleFilesSelected(Array.from(e.target.files) as File[]);
+          }
+        }}
+        className="hidden"
+      />
+
+      <div className="w-full max-w-5xl h-[88vh] bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+        
         {/* Modal Header */}
-        <div className="px-5 py-4 bg-slate-950/80 border-b border-slate-800 flex items-center justify-between gap-4">
+        <div className="px-5 py-3.5 bg-slate-950 border-b border-slate-800 flex items-center justify-between shrink-0">
           <div className="flex items-center space-x-3">
-            <div className="p-2.5 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-xl">
+            <div className="p-2 bg-indigo-500/10 border border-indigo-500/20 rounded-xl text-indigo-400">
               <Folder size={20} />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h3 className="text-base font-bold text-slate-100">Explorador de Archivos</h3>
-                <span className="text-xs font-mono bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 px-2 py-0.5 rounded font-semibold">
+              <h2 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                <span>Explorador de Archivos</span>
+                <span className="text-xs font-mono font-normal px-2 py-0.5 bg-slate-850 text-indigo-300 rounded border border-slate-800">
                   {serverName}
                 </span>
-              </div>
-              <p className="text-xs text-slate-400 mt-0.5">Navega, busca y edita los archivos del servidor de Minecraft en disco.</p>
+              </h2>
+              <p className="text-[11px] text-slate-400">
+                Navega, crea, edita e importa archivos locales directamente en las carpetas del servidor.
+              </p>
             </div>
           </div>
 
-          <button 
+          <button
             onClick={onClose}
-            className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition cursor-pointer"
+            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition cursor-pointer"
             id="close-files-modal-btn"
           >
             <X size={18} />
           </button>
         </div>
 
-        {/* Global Error Banner */}
+        {/* Global Error or Upload Status Banner */}
         {errorMsg && (
-          <div className="px-5 py-3 bg-rose-500/10 border-b border-rose-500/20 text-rose-300 text-xs font-medium flex items-center justify-between gap-2">
+          <div className="mx-4 mt-3 p-3 bg-rose-500/10 border border-rose-500/20 rounded-xl text-xs text-rose-300 flex items-center justify-between shrink-0">
             <div className="flex items-center gap-2">
-              <AlertCircle size={15} className="text-rose-400" />
+              <AlertCircle size={15} className="text-rose-400 shrink-0" />
               <span>{errorMsg}</span>
             </div>
             <button onClick={() => setErrorMsg(null)} className="text-rose-400 hover:text-white">
               <X size={14} />
             </button>
+          </div>
+        )}
+
+        {uploadStatusMsg && (
+          <div className={`mx-4 mt-3 p-3 rounded-xl border text-xs flex items-center justify-between shrink-0 animate-fadeIn ${
+            uploadStatusMsg.type === 'success' 
+              ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300' 
+              : 'bg-rose-500/10 border-rose-500/20 text-rose-300'
+          }`}>
+            <div className="flex items-center gap-2">
+              {uploadStatusMsg.type === 'success' ? <Check size={16} className="text-emerald-400 shrink-0" /> : <AlertCircle size={16} className="text-rose-400 shrink-0" />}
+              <span className="font-semibold">{uploadStatusMsg.text}</span>
+            </div>
+            <button onClick={() => setUploadStatusMsg(null)} className="opacity-70 hover:opacity-100">
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
+        {/* Upload Progress Bar Banner */}
+        {isUploading && uploadProgress && (
+          <div className="mx-4 mt-3 p-3.5 bg-indigo-950/50 border border-indigo-500/30 rounded-xl text-xs space-y-2 shrink-0 animate-fadeIn">
+            <div className="flex items-center justify-between text-indigo-200">
+              <div className="flex items-center gap-2 font-semibold">
+                <RefreshCw size={14} className="animate-spin text-indigo-400" />
+                <span>Importando archivo ({uploadProgress.current}/{uploadProgress.total}): <code className="text-white font-mono">{uploadProgress.currentFileName}</code></span>
+              </div>
+              <span className="font-mono font-bold text-indigo-300">{uploadProgress.percent}%</span>
+            </div>
+            <div className="w-full h-1.5 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
+              <div 
+                className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-300 rounded-full"
+                style={{ width: `${uploadProgress.percent}%` }}
+              />
+            </div>
           </div>
         )}
 
@@ -316,7 +519,7 @@ export function ServerFilesModal({ serverName, isOpen, onClose }: ServerFilesMod
               <div className="flex items-center space-x-3 truncate">
                 <button
                   onClick={() => setActiveEditingFile(null)}
-                  className="flex items-center gap-1 px-3 py-1.5 bg-slate-800 hover:bg-slate-750 text-slate-300 text-xs font-semibold rounded-lg transition"
+                  className="flex items-center gap-1 px-3 py-1.5 bg-slate-800 hover:bg-slate-750 text-slate-300 text-xs font-semibold rounded-lg transition cursor-pointer"
                   id="editor-back-btn"
                 >
                   <ArrowLeft size={14} />
@@ -368,9 +571,30 @@ export function ServerFilesModal({ serverName, isOpen, onClose }: ServerFilesMod
             </div>
           </div>
         ) : (
-          /* FILE BROWSER VIEW */
-          <div className="flex-1 flex flex-col overflow-hidden" id="file-browser-view">
-            {/* Toolbar: Breadcrumb + Search + Create */}
+          /* FILE BROWSER VIEW WITH DRAG AND DROP */
+          <div 
+            className="flex-1 flex flex-col overflow-hidden relative" 
+            id="file-browser-view"
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
+            {/* Drag & Drop Visual Overlay */}
+            {isDraggingOver && (
+              <div className="absolute inset-0 z-40 bg-indigo-950/90 border-2 border-dashed border-indigo-500 rounded-xl backdrop-blur-sm flex flex-col items-center justify-center space-y-3 pointer-events-none animate-fadeIn">
+                <div className="p-4 bg-indigo-500/20 rounded-full text-indigo-400 animate-bounce">
+                  <UploadCloud size={48} />
+                </div>
+                <p className="text-base font-bold text-white">
+                  Suelta tus archivos aquí para importarlos
+                </p>
+                <p className="text-xs text-indigo-300 font-mono">
+                  Destino: {currentPath}
+                </p>
+              </div>
+            )}
+
+            {/* Toolbar: Breadcrumb + Search + Upload & Create Actions */}
             <div className="p-4 bg-slate-900/60 border-b border-slate-800 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
               {/* Breadcrumb Path */}
               <div className="flex items-center space-x-1.5 overflow-x-auto text-xs font-mono bg-slate-950 px-3 py-2 rounded-xl border border-slate-850 text-slate-300 flex-1">
@@ -400,12 +624,12 @@ export function ServerFilesModal({ serverName, isOpen, onClose }: ServerFilesMod
 
               {/* Search input & actions */}
               <div className="flex items-center gap-2">
-                <form onSubmit={handleSearch} className="relative w-full md:w-56">
+                <form onSubmit={handleSearch} className="relative w-full md:w-48">
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Buscar en el servidor..."
+                    placeholder="Buscar archivos..."
                     className="w-full pl-8 pr-7 py-1.5 bg-slate-950 border border-slate-800 text-slate-200 rounded-xl text-xs font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
                     id="file-search-input"
                   />
@@ -420,6 +644,18 @@ export function ServerFilesModal({ serverName, isOpen, onClose }: ServerFilesMod
                     </button>
                   )}
                 </form>
+
+                {/* Import / Upload Action Button */}
+                <button
+                  onClick={handleSelectFilesClick}
+                  disabled={isUploading}
+                  className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow flex items-center gap-1.5 transition cursor-pointer shrink-0"
+                  title="Importar archivos locales a esta carpeta"
+                  id="upload-file-btn"
+                >
+                  <Upload size={14} />
+                  <span>Subir</span>
+                </button>
 
                 <button
                   onClick={() => { setIsCreateFolder(false); setCreateItemName(''); setShowCreateModal(true); }}
@@ -467,10 +703,19 @@ export function ServerFilesModal({ serverName, isOpen, onClose }: ServerFilesMod
                   <span className="text-xs font-mono">Cargando contenido del servidor...</span>
                 </div>
               ) : (searchQuery ? searchResults : items).length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-16 text-slate-500 space-y-2">
-                  <Folder size={36} className="text-slate-700" />
+                <div className="flex flex-col items-center justify-center py-16 text-slate-500 space-y-3">
+                  <UploadCloud size={42} className="text-slate-700" />
                   <span className="text-sm font-semibold text-slate-400">Esta carpeta está vacía</span>
-                  <span className="text-xs text-slate-600">Utiliza los botones superiores para crear nuevos archivos o carpetas.</span>
+                  <p className="text-xs text-slate-600 max-w-sm text-center">
+                    Arrastra y suelta archivos aquí para importarlos o utiliza el botón <strong className="text-indigo-400">Subir</strong> para agregarlos desde tu equipo.
+                  </p>
+                  <button
+                    onClick={handleSelectFilesClick}
+                    className="mt-2 px-4 py-2 bg-indigo-500/10 border border-indigo-500/20 hover:bg-indigo-500/20 text-indigo-300 text-xs font-semibold rounded-xl transition cursor-pointer flex items-center gap-1.5"
+                  >
+                    <Upload size={14} />
+                    <span>Seleccionar Archivos</span>
+                  </button>
                 </div>
               ) : (
                 <div className="space-y-1">
@@ -525,7 +770,7 @@ export function ServerFilesModal({ serverName, isOpen, onClose }: ServerFilesMod
                           {isTextFile(item) && (
                             <button
                               onClick={() => handleOpenFile(item.relativePath)}
-                              className="p-1.5 text-slate-400 hover:text-indigo-400 hover:bg-indigo-500/10 rounded transition"
+                              className="p-1.5 text-slate-400 hover:text-indigo-400 hover:bg-indigo-500/10 rounded transition cursor-pointer"
                               title="Editar archivo"
                             >
                               <FileText size={15} />
@@ -533,7 +778,7 @@ export function ServerFilesModal({ serverName, isOpen, onClose }: ServerFilesMod
                           )}
                           <button
                             onClick={() => setItemToDelete(item)}
-                            className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded transition"
+                            className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded transition cursor-pointer"
                             title="Eliminar"
                           >
                             <Trash2 size={15} />
@@ -551,9 +796,67 @@ export function ServerFilesModal({ serverName, isOpen, onClose }: ServerFilesMod
         {/* Modal Footer */}
         <div className="px-5 py-3 bg-slate-950/80 border-t border-slate-800 flex items-center justify-between text-xs text-slate-500">
           <span>Servidor: <strong className="text-slate-300 font-mono">{serverName}</strong></span>
-          <span>Ruta actual: <strong className="text-indigo-400 font-mono">{currentPath}</strong></span>
+          <span className="flex items-center gap-2">
+            <span>Carpeta actual: <strong className="text-indigo-400 font-mono">{currentPath}</strong></span>
+          </span>
         </div>
       </div>
+
+      {/* CONFLICT RESOLUTION MODAL */}
+      {conflictsToResolve && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-fadeIn" id="conflict-resolution-modal">
+          <div className="w-full max-w-md bg-slate-900 border border-amber-500/30 rounded-2xl p-6 shadow-2xl space-y-4">
+            <h3 className="text-base font-bold text-amber-400 flex items-center gap-2">
+              <AlertTriangle size={20} />
+              <span>Archivos Ya Existentes</span>
+            </h3>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Los siguientes {conflictsToResolve.conflictNames.length} archivo(s) ya existen en la carpeta <strong className="text-indigo-300 font-mono">{currentPath}</strong>:
+            </p>
+
+            <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 max-h-36 overflow-y-auto space-y-1 font-mono text-xs text-amber-200">
+              {conflictsToResolve.conflictNames.map((name, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <FileText size={13} className="text-amber-400 shrink-0" />
+                  <span className="truncate">{name}</span>
+                </div>
+              ))}
+            </div>
+
+            <p className="text-xs text-slate-400">
+              ¿Qué deseas hacer con los archivos que coinciden?
+            </p>
+
+            <div className="flex flex-col sm:flex-row justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setConflictsToResolve(null)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-xl cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const filteredFiles = conflictsToResolve.files.filter(f => !conflictsToResolve.conflictNames.includes(f.name));
+                  checkAndUploadFiles(filteredFiles, false);
+                }}
+                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-semibold rounded-xl cursor-pointer"
+              >
+                Omitir Existentes
+              </button>
+              <button
+                type="button"
+                onClick={() => checkAndUploadFiles(conflictsToResolve.files, true)}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl shadow cursor-pointer"
+              >
+                Sobrescribir Todos
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* CREATE FILE / FOLDER MODAL */}
       {showCreateModal && (
@@ -582,13 +885,13 @@ export function ServerFilesModal({ serverName, isOpen, onClose }: ServerFilesMod
                 <button
                   type="button"
                   onClick={() => setShowCreateModal(false)}
-                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-xl"
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-xl cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-xl"
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-xl cursor-pointer"
                 >
                   Crear
                 </button>

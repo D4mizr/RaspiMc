@@ -8,8 +8,8 @@ import { spawn, execSync, ChildProcessWithoutNullStreams } from 'child_process';
 const app = express();
 const PORT = 3000;
 
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // Health check endpoint for server readiness polling
 app.get('/api/health', (req, res) => {
@@ -885,6 +885,79 @@ app.put('/api/servers/:name/files/save', (req, res) => {
     });
   } catch (err: any) {
     return res.status(500).json({ error: `Error al escribir el archivo en el disco: ${err.message}` });
+  }
+});
+
+// Check File Upload Conflicts
+app.post('/api/servers/:name/files/check-conflicts', (req, res) => {
+  const serverName = req.params.name;
+  const { subpath, fileNames } = req.body;
+
+  if (!Array.isArray(fileNames)) {
+    return res.status(400).json({ error: 'Lista de nombres de archivos inválida.' });
+  }
+
+  const conflicts: string[] = [];
+  for (const fileName of fileNames) {
+    if (typeof fileName !== 'string' || !fileName.trim()) continue;
+    const targetPath = path.join(subpath || '/', fileName.trim());
+    const safe = resolveSafeServerPath(serverName, targetPath);
+    if (safe && fs.existsSync(safe.fullPath)) {
+      conflicts.push(fileName.trim());
+    }
+  }
+
+  return res.json({ success: true, conflicts });
+});
+
+// Upload File to Server Directory
+app.post('/api/servers/:name/files/upload', (req, res) => {
+  const serverName = req.params.name;
+  const { subpath, fileName, fileData, overwrite } = req.body;
+
+  if (!fileName || typeof fileData !== 'string') {
+    return res.status(400).json({ error: 'Faltan parámetros requeridos (fileName o fileData).' });
+  }
+
+  const cleanFileName = path.basename(fileName.trim());
+  if (!cleanFileName) {
+    return res.status(400).json({ error: 'Nombre de archivo inválido.' });
+  }
+
+  const targetPath = path.join(subpath || '/', cleanFileName);
+  const safe = resolveSafeServerPath(serverName, targetPath);
+  if (!safe) {
+    return res.status(403).json({ error: 'Acceso denegado: Intento de subir archivos fuera de la carpeta del servidor.' });
+  }
+
+  try {
+    const parentDir = path.dirname(safe.fullPath);
+    if (!fs.existsSync(parentDir)) {
+      fs.mkdirSync(parentDir, { recursive: true });
+    }
+
+    if (fs.existsSync(safe.fullPath) && !overwrite) {
+      return res.status(409).json({
+        conflict: true,
+        fileName: cleanFileName,
+        error: `El archivo "${cleanFileName}" ya existe en el servidor.`
+      });
+    }
+
+    // Clean base64 header if present (e.g. data:application/octet-stream;base64,...)
+    const base64Clean = fileData.replace(/^data:[^;]+;base64,/, '');
+    const buffer = Buffer.from(base64Clean, 'base64');
+
+    fs.writeFileSync(safe.fullPath, buffer);
+
+    return res.json({
+      success: true,
+      message: `Archivo "${cleanFileName}" importado correctamente.`,
+      savedPath: safe.relativeSubpath,
+      size: buffer.length
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: `Error al guardar el archivo importado: ${err.message}` });
   }
 });
 
