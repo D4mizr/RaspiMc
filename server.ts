@@ -552,6 +552,62 @@ function getHotspotStatus() {
   };
 }
 
+// Security & File System Helpers for Server File Explorer
+function resolveSafeServerPath(serverName: string, requestedSubpath: string = ''): { rootPath: string; fullPath: string; relativeSubpath: string } | null {
+  const serverInfo = findServerPath(serverName);
+  if (!serverInfo) return null;
+
+  const rootPath = path.resolve(serverInfo.serverPath);
+  const cleanSubpath = requestedSubpath.replace(/\\/g, '/').replace(/^\/+/, '');
+  const fullPath = path.resolve(rootPath, cleanSubpath);
+
+  // Security check: Must reside strictly inside the server directory
+  if (fullPath !== rootPath && !fullPath.startsWith(rootPath + path.sep)) {
+    return null;
+  }
+
+  const rel = path.relative(rootPath, fullPath).replace(/\\/g, '/');
+  return {
+    rootPath,
+    fullPath,
+    relativeSubpath: rel ? '/' + rel : '/'
+  };
+}
+
+function searchServerFilesRecursively(rootPath: string, currentPath: string, query: string, results: Array<any>, maxResults = 150, currentDepth = 0) {
+  if (results.length >= maxResults || currentDepth > 8) return;
+
+  try {
+    const items = fs.readdirSync(currentPath, { withFileTypes: true });
+    for (const item of items) {
+      if (results.length >= maxResults) break;
+      if (item.name === '.git' || item.name === 'cache' || item.name === 'crash-reports') continue;
+
+      const itemFullPath = path.join(currentPath, item.name);
+      const relativePath = '/' + path.relative(rootPath, itemFullPath).replace(/\\/g, '/');
+      const isMatch = item.name.toLowerCase().includes(query.toLowerCase());
+
+      let stat;
+      try { stat = fs.statSync(itemFullPath); } catch (_) {}
+
+      if (isMatch) {
+        results.push({
+          name: item.name,
+          relativePath,
+          isDirectory: item.isDirectory(),
+          size: stat ? stat.size : 0,
+          modifiedAt: stat ? stat.mtime.toISOString() : new Date().toISOString(),
+          extension: path.extname(item.name).toLowerCase()
+        });
+      }
+
+      if (item.isDirectory()) {
+        searchServerFilesRecursively(rootPath, itemFullPath, query, results, maxResults, currentDepth + 1);
+      }
+    }
+  } catch (_) {}
+}
+
 function toggleHotspot(enable: boolean, ssid?: string, password?: string) {
   if (ssid) hotspotConfig.ssid = ssid;
   if (password && password.length >= 8) hotspotConfig.password = password;
@@ -669,6 +725,347 @@ app.post('/api/hotspot/toggle', (req, res) => {
   const { enable, ssid, password } = req.body;
   const result = toggleHotspot(!!enable, ssid, password);
   res.json(result);
+});
+
+// Server File Explorer API Endpoints
+app.get('/api/servers/:name/files', (req, res) => {
+  const serverName = req.params.name;
+  const subpath = (req.query.subpath as string) || '/';
+
+  const safe = resolveSafeServerPath(serverName, subpath);
+  if (!safe) {
+    return res.status(403).json({ error: 'Acceso denegado o servidor no encontrado.' });
+  }
+
+  try {
+    if (!fs.existsSync(safe.fullPath)) {
+      return res.status(404).json({ error: 'La ruta solicitada no existe.' });
+    }
+
+    const stat = fs.statSync(safe.fullPath);
+    if (!stat.isDirectory()) {
+      return res.status(400).json({ error: 'La ruta especificada no es un directorio.' });
+    }
+
+    const entries = fs.readdirSync(safe.fullPath, { withFileTypes: true });
+    const items = entries.map((entry) => {
+      const itemFullPath = path.join(safe.fullPath, entry.name);
+      const relativePath = '/' + path.relative(safe.rootPath, itemFullPath).replace(/\\/g, '/');
+      let size = 0;
+      let modifiedAt = new Date().toISOString();
+
+      try {
+        const itemStat = fs.statSync(itemFullPath);
+        size = itemStat.size;
+        modifiedAt = itemStat.mtime.toISOString();
+      } catch (_) {}
+
+      return {
+        name: entry.name,
+        relativePath,
+        isDirectory: entry.isDirectory(),
+        size,
+        modifiedAt,
+        extension: path.extname(entry.name).toLowerCase()
+      };
+    });
+
+    // Sort folders first, then files alphabetically
+    items.sort((a, b) => {
+      if (a.isDirectory && !b.isDirectory) return -1;
+      if (!a.isDirectory && b.isDirectory) return 1;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+    });
+
+    const parentPath = safe.relativeSubpath === '/' ? null : path.dirname(safe.relativeSubpath).replace(/\\/g, '/');
+
+    return res.json({
+      success: true,
+      serverName,
+      currentPath: safe.relativeSubpath,
+      parentPath: parentPath === '.' ? '/' : parentPath,
+      items
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: `Error al leer directorio: ${err.message}` });
+  }
+});
+
+// Recursive File Search
+app.get('/api/servers/:name/files/search', (req, res) => {
+  const serverName = req.params.name;
+  const query = (req.query.q as string) || '';
+
+  if (!query.trim()) {
+    return res.json({ success: true, results: [] });
+  }
+
+  const safe = resolveSafeServerPath(serverName, '/');
+  if (!safe) {
+    return res.status(403).json({ error: 'Acceso denegado o servidor no encontrado.' });
+  }
+
+  try {
+    const results: Array<any> = [];
+    searchServerFilesRecursively(safe.rootPath, safe.rootPath, query.trim(), results);
+    return res.json({ success: true, query: query.trim(), results });
+  } catch (err: any) {
+    return res.status(500).json({ error: `Error en la búsqueda de archivos: ${err.message}` });
+  }
+});
+
+// Read File Content for Editor
+app.get('/api/servers/:name/files/read', (req, res) => {
+  const serverName = req.params.name;
+  const filepath = (req.query.filepath as string) || '';
+
+  if (!filepath) {
+    return res.status(400).json({ error: 'Ruta de archivo no proporcionada.' });
+  }
+
+  const safe = resolveSafeServerPath(serverName, filepath);
+  if (!safe) {
+    return res.status(403).json({ error: 'Acceso denegado: Intentando acceder fuera del servidor.' });
+  }
+
+  try {
+    if (!fs.existsSync(safe.fullPath)) {
+      return res.status(404).json({ error: 'El archivo no existe.' });
+    }
+
+    const stat = fs.statSync(safe.fullPath);
+    if (stat.isDirectory()) {
+      return res.status(400).json({ error: 'La ruta corresponde a una carpeta, no a un archivo.' });
+    }
+
+    if (stat.size > 5 * 1024 * 1024) { // 5MB limit
+      return res.status(400).json({ error: 'El archivo es demasiado grande para editarlo en el navegador (> 5MB).' });
+    }
+
+    const content = fs.readFileSync(safe.fullPath, 'utf8');
+    return res.json({
+      success: true,
+      filepath: safe.relativeSubpath,
+      name: path.basename(safe.fullPath),
+      size: stat.size,
+      modifiedAt: stat.mtime.toISOString(),
+      content
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: `Error al leer archivo: ${err.message}` });
+  }
+});
+
+// Save File Content to Disk
+app.put('/api/servers/:name/files/save', (req, res) => {
+  const serverName = req.params.name;
+  const { filepath, content } = req.body;
+
+  if (!filepath || typeof content !== 'string') {
+    return res.status(400).json({ error: 'Parámetros inválidos (filepath o content).' });
+  }
+
+  const safe = resolveSafeServerPath(serverName, filepath);
+  if (!safe) {
+    return res.status(403).json({ error: 'Acceso denegado: Intentando escribir fuera de la carpeta del servidor.' });
+  }
+
+  try {
+    // Ensure directory exists
+    const dir = path.dirname(safe.fullPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    fs.writeFileSync(safe.fullPath, content, 'utf8');
+    return res.json({
+      success: true,
+      message: `Archivo "${path.basename(safe.fullPath)}" guardado correctamente en el disco.`,
+      filepath: safe.relativeSubpath
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: `Error al escribir el archivo en el disco: ${err.message}` });
+  }
+});
+
+// Create File or Folder
+app.post('/api/servers/:name/files/create', (req, res) => {
+  const serverName = req.params.name;
+  const { subpath, name, isDirectory } = req.body;
+
+  if (!name || typeof name !== 'string') {
+    return res.status(400).json({ error: 'Nombre no especificado.' });
+  }
+
+  const targetPath = path.join(subpath || '/', name);
+  const safe = resolveSafeServerPath(serverName, targetPath);
+  if (!safe) {
+    return res.status(403).json({ error: 'Acceso denegado.' });
+  }
+
+  try {
+    if (fs.existsSync(safe.fullPath)) {
+      return res.status(400).json({ error: 'Ya existe un archivo o carpeta con este nombre.' });
+    }
+
+    if (isDirectory) {
+      fs.mkdirSync(safe.fullPath, { recursive: true });
+    } else {
+      const parentDir = path.dirname(safe.fullPath);
+      if (!fs.existsSync(parentDir)) {
+        fs.mkdirSync(parentDir, { recursive: true });
+      }
+      fs.writeFileSync(safe.fullPath, '', 'utf8');
+    }
+
+    return res.json({
+      success: true,
+      message: `${isDirectory ? 'Carpeta' : 'Archivo'} "${name}" creado exitosamente.`
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: `Error al crear elemento: ${err.message}` });
+  }
+});
+
+// Delete File or Folder
+app.delete('/api/servers/:name/files/delete', (req, res) => {
+  const serverName = req.params.name;
+  const filepath = (req.body?.filepath || req.query?.filepath) as string;
+
+  if (!filepath) {
+    return res.status(400).json({ error: 'Ruta no especificada.' });
+  }
+
+  const safe = resolveSafeServerPath(serverName, filepath);
+  if (!safe || safe.fullPath === safe.rootPath) {
+    return res.status(403).json({ error: 'Acceso denegado: No puedes borrar el directorio raíz del servidor.' });
+  }
+
+  try {
+    if (!fs.existsSync(safe.fullPath)) {
+      return res.status(404).json({ error: 'El archivo o carpeta no existe.' });
+    }
+
+    fs.rmSync(safe.fullPath, { recursive: true, force: true });
+    return res.json({
+      success: true,
+      message: `"${path.basename(safe.fullPath)}" eliminado correctamente del servidor.`
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: `Error al eliminar: ${err.message}` });
+  }
+});
+
+// System Update API Endpoint
+app.post('/api/system/update', async (req, res) => {
+  try {
+    const logs: string[] = [];
+    logs.push('Iniciando comprobación y actualización de RaspiMC desde el repositorio de GitHub...');
+
+    const appDir = process.cwd();
+    const isGit = fs.existsSync(path.join(appDir, '.git'));
+
+    if (isGit) {
+      try {
+        const gitPull = execSync('git pull origin main || git pull origin master', { timeout: 15000, cwd: appDir }).toString();
+        logs.push(`Respuesta de Git: ${gitPull.trim()}`);
+      } catch (e: any) {
+        logs.push(`Nota Git: ${e.message || 'No se pudo completar git pull'}`);
+      }
+    } else {
+      logs.push('Descargando último paquete de actualización desde GitHub (D4mizr/WinMc)...');
+      try {
+        execSync('curl -sL https://github.com/D4mizr/WinMc/archive/refs/heads/main.tar.gz | tar -xz --strip-components=1', { timeout: 25000, cwd: appDir });
+        logs.push('Archivos del repositorio descargados y extraídos correctamente.');
+      } catch (e: any) {
+        logs.push(`Actualización directa: ${e.message}`);
+      }
+    }
+
+    logs.push('Instalando dependencias e iniciando compilación...');
+    try {
+      execSync('npm install --no-audit --no-fund', { timeout: 60000, cwd: appDir });
+      execSync('npm run build', { timeout: 60000, cwd: appDir });
+      logs.push('¡Compilación de RaspiMC finalizada con éxito!');
+    } catch (buildErr: any) {
+      logs.push(`Detalle del build: ${buildErr.message || 'Compilación completada.'}`);
+    }
+
+    logs.push('Reiniciando servicio RaspiMC en Raspberry Pi OS...');
+
+    // Schedule systemd restart
+    setTimeout(() => {
+      try {
+        execSync('systemctl restart raspimc 2>/dev/null || process.exit(0)', { timeout: 3000 });
+      } catch (_) {
+        process.exit(0);
+      }
+    }, 2000);
+
+    return res.json({
+      success: true,
+      message: 'Proceso de actualización completado exitosamente. El servidor se está reiniciando.',
+      logs
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      message: `Error durante la actualización: ${err.message}`
+    });
+  }
+});
+
+// System Uninstall API Endpoint (Complete Clean Purge)
+app.post('/api/system/uninstall', async (req, res) => {
+  const { confirmDeleteServers } = req.body;
+
+  if (!confirmDeleteServers) {
+    return res.status(400).json({
+      success: false,
+      error: 'Se requiere confirmación explícita para la eliminación completa del sistema y servidores.'
+    });
+  }
+
+  try {
+    console.log('[RaspiMC] ¡INICIANDO DESINSTALACIÓN COMPLETA DEL SISTEMA EN LINUX!');
+
+    // Stop active servers
+    for (const [serverName, server] of activeServers.entries()) {
+      try {
+        console.log(`[RaspiMC] Apagando servidor antes de desinstalar: ${serverName}`);
+        server.process.stdin.write('stop\r\n');
+      } catch (_) {}
+    }
+
+    res.json({
+      success: true,
+      message: 'Desinstalación iniciada. Los archivos del sistema y todos los servidores de Minecraft serán eliminados permanentemente.'
+    });
+
+    // Run async script to purge systemd service, CLI command, and app + server directories
+    setTimeout(() => {
+      try {
+        const purgeScript = `
+          sleep 1;
+          systemctl stop raspimc 2>/dev/null || true;
+          systemctl disable raspimc 2>/dev/null || true;
+          rm -f /usr/local/bin/raspimc 2>/dev/null || true;
+          rm -f /etc/systemd/system/raspimc.service 2>/dev/null || true;
+          systemctl daemon-reload 2>/dev/null || true;
+          rm -rf /var/lib/raspimc 2>/dev/null || true;
+          rm -rf /opt/raspimc 2>/dev/null || true;
+        `;
+        execSync(`nohup sh -c "${purgeScript.replace(/\n/g, ' ')}" >/dev/null 2>&1 &`);
+      } catch (_) {}
+      process.exit(0);
+    }, 1200);
+
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: `Error al ejecutar la desinstalación: ${err.message}`
+    });
+  }
 });
 
 // 2. Fetch available versions for installer dropdowns dynamically

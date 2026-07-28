@@ -16,7 +16,13 @@ import {
   Plus,
   Trash2,
   HardDrive,
-  Cpu
+  Cpu,
+  GitBranch,
+  Download,
+  AlertTriangle,
+  X,
+  ShieldAlert,
+  Terminal as TerminalIcon
 } from 'lucide-react';
 
 interface SettingsData {
@@ -44,6 +50,64 @@ export default function SettingsPage({ navigate, onSettingsSaved }: SettingsPage
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Update State
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [updateLogs, setUpdateLogs] = useState<string[]>([]);
+  const [updateStatusMsg, setUpdateStatusMsg] = useState<string | null>(null);
+
+  // Uninstall Modal State
+  const [showUninstallModal, setShowUninstallModal] = useState(false);
+  const [uninstallConfirmedCheckbox, setUninstallConfirmedCheckbox] = useState(false);
+  const [uninstallTextConfirm, setUninstallTextConfirm] = useState('');
+  const [isUninstalling, setIsUninstalling] = useState(false);
+  const [uninstallStatusMsg, setUninstallStatusMsg] = useState<string | null>(null);
+
+  const handleTriggerUpdate = () => {
+    setIsUpdating(true);
+    setUpdateLogs(['Iniciando proceso de actualización desde GitHub (D4mizr/WinMc)...']);
+    setUpdateStatusMsg(null);
+
+    fetch('/api/system/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+      .then(res => {
+        if (!res.ok) return res.json().then(d => { throw new Error(d.message || 'Error al actualizar'); });
+        return res.json();
+      })
+      .then(data => {
+        if (data.logs) setUpdateLogs(data.logs);
+        setUpdateStatusMsg(data.message || 'Actualización completada exitosamente.');
+      })
+      .catch(err => {
+        setUpdateStatusMsg(`Error de actualización: ${err.message}`);
+      })
+      .finally(() => setIsUpdating(false));
+  };
+
+  const handleTriggerUninstall = () => {
+    if (!uninstallConfirmedCheckbox || uninstallTextConfirm.trim().toUpperCase() !== 'DESINSTALAR') {
+      return;
+    }
+
+    setIsUninstalling(true);
+    setUninstallStatusMsg('Eliminando servicios, comandos CLI, archivos de RaspiMC y servidores de Minecraft...');
+
+    fetch('/api/system/uninstall', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirmDeleteServers: true })
+    })
+      .then(res => res.json())
+      .then(data => {
+        setUninstallStatusMsg(data.message || 'Desinstalación completada. Todos los archivos y servidores han sido eliminados.');
+      })
+      .catch(err => {
+        setUninstallStatusMsg(`Error al desinstalar: ${err.message}`);
+        setIsUninstalling(false);
+      });
+  };
 
   // Load saved settings from API
   const loadSettings = () => {
@@ -325,6 +389,88 @@ export default function SettingsPage({ navigate, onSettingsSaved }: SettingsPage
           </div>
         </div>
 
+        {/* System Update Section */}
+        <div className="bg-slate-900/60 p-5 rounded-xl border border-slate-800 space-y-4" id="settings-update-section">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-1">
+              <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                <GitBranch size={16} className="text-indigo-400" />
+                <span>Actualización del Sistema (GitHub)</span>
+              </h3>
+              <p className="text-xs text-slate-400">
+                Mantiene RaspiMC actualizado descargando el código más reciente desde el repositorio oficial de GitHub (<code className="text-indigo-300 font-mono">D4mizr/WinMc</code>).
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleTriggerUpdate}
+              disabled={isUpdating}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg shadow flex items-center gap-2 transition cursor-pointer shrink-0 self-start sm:self-center"
+              id="trigger-update-btn"
+            >
+              {isUpdating ? (
+                <>
+                  <RefreshCw size={14} className="animate-spin" />
+                  <span>Actualizando...</span>
+                </>
+              ) : (
+                <>
+                  <Download size={14} />
+                  <span>Buscar y Aplicar Actualización</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* Update logs or status message */}
+          {updateStatusMsg && (
+            <div className={`p-3 rounded-lg border text-xs font-medium flex items-center gap-2 ${
+              updateStatusMsg.includes('Error') ? 'bg-rose-500/10 border-rose-500/20 text-rose-300' : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'
+            }`}>
+              {updateStatusMsg.includes('Error') ? <AlertCircle size={15} /> : <CheckCircle size={15} />}
+              <span>{updateStatusMsg}</span>
+            </div>
+          )}
+
+          {updateLogs.length > 0 && (
+            <div className="bg-slate-950 p-3 rounded-lg border border-slate-850 font-mono text-[11px] text-slate-400 space-y-1 max-h-40 overflow-y-auto">
+              {updateLogs.map((log, idx) => (
+                <p key={idx} className="leading-tight">{log}</p>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Danger Zone: Uninstall Section */}
+        <div className="bg-rose-950/20 p-5 rounded-xl border border-rose-500/30 space-y-4" id="settings-uninstall-section">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-1">
+              <h3 className="text-sm font-bold text-rose-400 flex items-center gap-2">
+                <ShieldAlert size={16} className="text-rose-400" />
+                <span>Zona de Peligro: Desinstalar RaspiMC</span>
+              </h3>
+              <p className="text-xs text-rose-200/80">
+                Elimina permanentemente RaspiMC, el comando CLI, el servicio systemd y <strong>TODOS los servidores de Minecraft</strong> almacenados en el sistema.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                setUninstallConfirmedCheckbox(false);
+                setUninstallTextConfirm('');
+                setShowUninstallModal(true);
+              }}
+              className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-lg shadow flex items-center gap-1.5 transition cursor-pointer shrink-0 self-start sm:self-center"
+              id="open-uninstall-modal-btn"
+            >
+              <Trash2 size={14} />
+              <span>Desinstalar Aplicación</span>
+            </button>
+          </div>
+        </div>
+
         {/* Action Buttons */}
         <div className="pt-4 border-t border-slate-850 flex items-center justify-end space-x-3" id="settings-actions">
           <button
@@ -356,6 +502,110 @@ export default function SettingsPage({ navigate, onSettingsSaved }: SettingsPage
         </div>
 
       </form>
+
+      {/* UNINSTALL DISCLAIMER MODAL */}
+      {showUninstallModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-fadeIn" id="uninstall-disclaimer-modal">
+          <div className="w-full max-w-lg bg-slate-900 border border-rose-500/40 rounded-2xl p-6 shadow-2xl space-y-5">
+            <div className="flex items-center justify-between pb-3 border-b border-rose-500/20">
+              <div className="flex items-center space-x-2.5 text-rose-400">
+                <ShieldAlert size={22} />
+                <h3 className="text-base font-bold text-slate-100">Desinstalación Completa del Sistema</h3>
+              </div>
+              <button 
+                onClick={() => setShowUninstallModal(false)}
+                className="text-slate-400 hover:text-white p-1 rounded"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Disclaimer Body */}
+            <div className="space-y-3 text-xs leading-relaxed text-slate-300">
+              <div className="p-3.5 bg-rose-500/10 border border-rose-500/30 rounded-xl space-y-2 text-rose-200">
+                <p className="font-bold flex items-center gap-1.5 text-rose-300">
+                  <AlertTriangle size={15} />
+                  <span>DESCARGO DE RESPONSABILIDAD IMPORTANTE:</span>
+                </p>
+                <ul className="list-disc list-inside space-y-1 font-medium text-slate-200">
+                  <li>La aplicación <strong>RaspiMC</strong> será desinstalada por completo.</li>
+                  <li>El servicio nativo <code className="text-rose-300 font-mono">raspimc.service</code> y el comando <code className="text-rose-300 font-mono">raspimc</code> serán eliminados.</li>
+                  <li><strong className="text-rose-400 uppercase">TODOS TUS SERVIDORES DE MINECRAFT SE BORRARÁN DEFINITIVAMENTE</strong> (incluyendo mundos, mapas, plugins, jugadores, inventarios y archivos configurados en <code className="text-rose-300 font-mono">/var/lib/raspimc/servers</code>).</li>
+                  <li>No quedará ningún rastro de datos residuales de la aplicación.</li>
+                  <li><strong>ESTA ACCIÓN ES TOTALMENTE IRREVERSIBLE.</strong></li>
+                </ul>
+              </div>
+
+              {uninstallStatusMsg && (
+                <div className="p-3 bg-indigo-500/10 border border-indigo-500/20 rounded-xl text-indigo-300 font-semibold flex items-center gap-2">
+                  <RefreshCw size={14} className="animate-spin text-indigo-400 shrink-0" />
+                  <span>{uninstallStatusMsg}</span>
+                </div>
+              )}
+
+              {/* Confirmations */}
+              {!isUninstalling && (
+                <div className="space-y-3 pt-2">
+                  <label className="flex items-start gap-2.5 cursor-pointer bg-slate-950 p-3 rounded-xl border border-slate-800">
+                    <input
+                      type="checkbox"
+                      checked={uninstallConfirmedCheckbox}
+                      onChange={(e) => setUninstallConfirmedCheckbox(e.target.checked)}
+                      className="mt-0.5 rounded text-rose-600 focus:ring-rose-500 bg-slate-900 border-slate-700"
+                    />
+                    <span className="font-semibold text-slate-200">
+                      Entiendo y acepto que la aplicación RaspiMC y todos los datos de mis servidores de Minecraft serán eliminados permanentemente.
+                    </span>
+                  </label>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                      Para confirmar, escribe <code className="text-rose-400 font-bold">DESINSTALAR</code> a continuación:
+                    </label>
+                    <input
+                      type="text"
+                      value={uninstallTextConfirm}
+                      onChange={(e) => setUninstallTextConfirm(e.target.value)}
+                      placeholder="Escribe DESINSTALAR aquí"
+                      className="w-full px-3.5 py-2 bg-slate-950 border border-rose-500/30 text-rose-300 font-bold font-mono rounded-xl focus:outline-none focus:ring-1 focus:ring-rose-500 text-sm"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setShowUninstallModal(false)}
+                disabled={isUninstalling}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-xl cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleTriggerUninstall}
+                disabled={!uninstallConfirmedCheckbox || uninstallTextConfirm.trim().toUpperCase() !== 'DESINSTALAR' || isUninstalling}
+                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold rounded-xl shadow transition cursor-pointer flex items-center gap-1.5"
+              >
+                {isUninstalling ? (
+                  <>
+                    <RefreshCw size={14} className="animate-spin" />
+                    <span>Eliminando Todo...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={14} />
+                    <span>Eliminar RaspiMC y Servidores Definitivamente</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

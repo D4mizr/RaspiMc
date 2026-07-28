@@ -22,10 +22,12 @@ import {
   CheckCircle2,
   Lock,
   Compass,
-  Info
+  Info,
+  Folder
 } from 'lucide-react';
 import { MinecraftServer } from '../types';
 import { PlayerModal } from './PlayerModal';
+import { ServerFilesModal } from './ServerFilesModal';
 
 interface McDetailProps {
   server: MinecraftServer;
@@ -48,6 +50,7 @@ export default function McDetail({
   const [ramUsed, setRamUsed] = useState(0);
   const [adminMessage, setAdminMessage] = useState('');
   const [selectedPlayerForModal, setSelectedPlayerForModal] = useState<string | null>(null);
+  const [showFilesModal, setShowFilesModal] = useState<boolean>(false);
 
   const isOnline = server.status === 'online';
   const isOffline = server.status === 'offline';
@@ -117,19 +120,28 @@ export default function McDetail({
           </div>
         </div>
 
-        {/* Quick Tabs to Console / Config */}
+        {/* Quick Tabs to Console / Config / Files */}
         <div className="flex items-center gap-2" id="quick-tabs">
           <button
             onClick={() => navigate(`/mc/${encodeURIComponent(server.name)}/console`)}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-950 border border-slate-850 text-slate-400 hover:text-slate-200 hover:bg-slate-800 text-xs font-semibold rounded-lg transition"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-950 border border-slate-850 text-slate-400 hover:text-slate-200 hover:bg-slate-800 text-xs font-semibold rounded-lg transition cursor-pointer"
             id="quick-console-btn"
           >
             <Terminal size={13} />
             <span>Consola</span>
           </button>
           <button
+            onClick={() => setShowFilesModal(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 hover:bg-indigo-500/20 text-xs font-semibold rounded-lg transition cursor-pointer"
+            id="quick-files-btn"
+            title="Explorador de Archivos"
+          >
+            <Folder size={13} className="text-indigo-400" />
+            <span>Archivos</span>
+          </button>
+          <button
             onClick={() => navigate(`/mc/${encodeURIComponent(server.name)}/config`)}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-950 border border-slate-850 text-slate-400 hover:text-slate-200 hover:bg-slate-800 text-xs font-semibold rounded-lg transition"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-950 border border-slate-850 text-slate-400 hover:text-slate-200 hover:bg-slate-800 text-xs font-semibold rounded-lg transition cursor-pointer"
             id="quick-settings-btn"
           >
             <Settings size={13} />
@@ -420,6 +432,13 @@ export default function McDetail({
         isOpen={!!selectedPlayerForModal}
         onClose={() => setSelectedPlayerForModal(null)}
         onAdminAction={handleAdminAction}
+      />
+
+      {/* Server Files Modal */}
+      <ServerFilesModal
+        serverName={server.name}
+        isOpen={showFilesModal}
+        onClose={() => setShowFilesModal(false)}
       />
 
     </div>

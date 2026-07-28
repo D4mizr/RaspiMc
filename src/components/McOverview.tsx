@@ -22,10 +22,12 @@ import {
   Trash2,
   HardDrive,
   Download,
-  AlertCircle
+  AlertCircle,
+  Folder
 } from 'lucide-react';
 import { MinecraftServer } from '../types';
 import { PlayerModal } from './PlayerModal';
+import { ServerFilesModal } from './ServerFilesModal';
 
 interface McOverviewProps {
   servers: MinecraftServer[];
@@ -54,6 +56,7 @@ export default function McOverview({
   const [modpackSuccessMessage, setModpackSuccessMessage] = useState('');
   const [serverToDelete, setServerToDelete] = useState<string | null>(null);
   const [playerModal, setPlayerModal] = useState<{ serverName: string; playerName: string } | null>(null);
+  const [fileBrowserServer, setFileBrowserServer] = useState<string | null>(null);
 
   // Install server form state
   const [formName, setFormName] = useState('');
@@ -436,6 +439,16 @@ export default function McOverview({
                         </button>
 
                         <button
+                          onClick={() => setFileBrowserServer(server.name)}
+                          className="flex items-center gap-1.5 px-3.5 py-1.5 bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 hover:bg-indigo-500/20 text-xs font-semibold rounded-lg transition cursor-pointer"
+                          id={`files-server-btn-${server.name}`}
+                          title="Explorador de Archivos del Servidor"
+                        >
+                          <Folder size={12} className="text-indigo-400" />
+                          <span>Archivos</span>
+                        </button>
+
+                        <button
                           onClick={() => { onSelectServer(server.name); navigate(`/mc/${encodeURIComponent(server.name)}/config`); }}
                           className="flex items-center gap-1.5 px-3.5 py-1.5 bg-slate-950 border border-slate-850 text-slate-400 hover:text-slate-200 hover:bg-slate-800 text-xs font-semibold rounded-lg transition cursor-pointer"
                           id={`config-server-btn-${server.name}`}
@@ -776,6 +789,15 @@ export default function McOverview({
           playerName={playerModal.playerName}
           isOpen={!!playerModal}
           onClose={() => setPlayerModal(null)}
+        />
+      )}
+
+      {/* Server Files Modal */}
+      {fileBrowserServer && (
+        <ServerFilesModal
+          serverName={fileBrowserServer}
+          isOpen={!!fileBrowserServer}
+          onClose={() => setFileBrowserServer(null)}
         />
       )}
 
